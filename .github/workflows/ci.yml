@@ -24,7 +24,23 @@ jobs:
         run: >-
           python -c "import json, pathlib, py_compile; py_compile.compile('install.py', doraise=True); py_compile.compile('scripts/brain.py', doraise=True); [json.loads(path.read_text(encoding='utf-8')) for path in pathlib.Path('hooks').rglob('*.json')]; print('static checks passed')"
       - name: Run native smoke suite
-        run: python tests/smoke_test.py
+        shell: python
+        run: |
+          import subprocess
+          import sys
+
+          result = subprocess.run(
+              [sys.executable, "tests/smoke_test.py"],
+              text=True,
+              capture_output=True,
+          )
+          print(result.stdout, end="")
+          print(result.stderr, end="", file=sys.stderr)
+          if result.returncode:
+              detail = (result.stdout + result.stderr).replace("%", "%25")
+              detail = detail.replace("\r", "%0D").replace("\n", "%0A")
+              print(f"::error title=Native smoke suite failed::{detail}")
+              raise SystemExit(result.returncode)
       - name: Run POSIX shell smoke suite
         if: runner.os != 'Windows'
         run: bash tests/smoke_test.sh
