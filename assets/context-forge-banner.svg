@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="640" viewBox="0 0 1600 640" fill="none" role="img" aria-labelledby="title description">
+  <title id="title">Context Forge</title>
+  <desc id="description">An abstract forge of connected project knowledge.</desc>
+  <defs>
+    <linearGradient id="bg" x1="84" y1="48" x2="1500" y2="610" gradientUnits="userSpaceOnUse"><stop stop-color="#07111F"/><stop offset=".48" stop-color="#10284A"/><stop offset="1" stop-color="#17142B"/></linearGradient>
+    <linearGradient id="beam" x1="176" y1="505" x2="1333" y2="134" gradientUnits="userSpaceOnUse"><stop stop-color="#1EE3CF" stop-opacity=".06"/><stop offset=".52" stop-color="#55A9FF" stop-opacity=".88"/><stop offset="1" stop-color="#F0A64A" stop-opacity=".12"/></linearGradient>
+    <linearGradient id="forge" x1="742" y1="206" x2="1058" y2="455" gradientUnits="userSpaceOnUse"><stop stop-color="#89F5E7"/><stop offset=".48" stop-color="#61A9FF"/><stop offset="1" stop-color="#F7B45C"/></linearGradient>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="14" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    <pattern id="grid" width="56" height="56" patternUnits="userSpaceOnUse"><path d="M56 0H0V56" stroke="#BDE3FF" stroke-opacity=".06"/></pattern>
+  </defs>
+  <rect width="1600" height="640" rx="32" fill="url(#bg)"/><rect width="1600" height="640" rx="32" fill="url(#grid)"/>
+  <circle cx="1270" cy="126" r="262" fill="#4A7DFF" fill-opacity=".12"/><circle cx="1390" cy="536" r="270" fill="#F0A64A" fill-opacity=".06"/>
+  <path d="M-48 548C276 466 401 536 632 411C899 267 1110 97 1660 145" stroke="url(#beam)" stroke-width="2"/>
+  <path d="M-48 582C267 502 430 555 659 436C906 308 1141 129 1660 184" stroke="#8FE7FF" stroke-opacity=".12"/><path d="M-48 513C257 431 367 510 601 380C883 223 1088 57 1660 106" stroke="#F4B15C" stroke-opacity=".1"/>
+  <g stroke="#9BD8FF" stroke-opacity=".28" stroke-width="2"><path d="M145 181H336L458 302"/><path d="M222 437H424L526 345"/><path d="M1186 188H1372L1455 269"/><path d="M1112 466H1318L1437 377"/></g>
+  <g fill="#B7EDFF" filter="url(#glow)"><circle cx="145" cy="181" r="6"/><circle cx="336" cy="181" r="5"/><circle cx="458" cy="302" r="7"/><circle cx="222" cy="437" r="5"/><circle cx="424" cy="437" r="6"/><circle cx="526" cy="345" r="7"/><circle cx="1186" cy="188" r="5"/><circle cx="1372" cy="188" r="7"/><circle cx="1455" cy="269" r="5"/><circle cx="1112" cy="466" r="7"/><circle cx="1318" cy="466" r="5"/><circle cx="1437" cy="377" r="6"/></g>
+  <g transform="translate(645 156)"><path d="M155 0L305 86V258L155 344L5 258V86L155 0Z" fill="#0A1B31" fill-opacity=".72" stroke="url(#forge)" stroke-width="3"/><path d="M155 48L260 108V229L155 289L50 229V108L155 48Z" fill="#0E2A4A" stroke="#9DEEE5" stroke-opacity=".56" stroke-width="2"/><path d="M155 93L218 130V202L155 239L92 202V130L155 93Z" fill="url(#forge)" fill-opacity=".9"/><path d="M155 94V239M92 130L218 202M218 130L92 202" stroke="#E7FFFF" stroke-opacity=".6" stroke-width="2"/><circle cx="155" cy="166" r="21" fill="#E4FFF9" filter="url(#glow)"/></g>
+  <g fill="#F0F8FF"><text x="126" y="290" font-family="Arial, Helvetica, sans-serif" font-size="34" font-weight="700" letter-spacing="7" fill-opacity=".72">CONTEXT</text><text x="122" y="374" font-family="Arial, Helvetica, sans-serif" font-size="86" font-weight="800" letter-spacing="-3">Forge</text><text x="130" y="425" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="400" letter-spacing=".2" fill-opacity=".72">Durable project memory for coding agents</text></g>
+  <text x="1158" y="518" fill="#D9EBFF" fill-opacity=".68" font-family="Arial, Helvetica, sans-serif" font-size="16" letter-spacing="1.8">RECALL LESS. BUILD MORE.</text>
+</svg>
