@@ -486,9 +486,12 @@ class ContextForgeSmokeTests(unittest.TestCase):
         self.assertEqual(before, self.canonical_snapshot())
 
     def test_installer_renders_custom_engine_and_reconciles_idempotently(self) -> None:
-        engine = self._tmp.name and Path(self._tmp.name) / "custom context-forge engine"
-        assert engine is not None
+        engine = Path(self._tmp.name) / "custom context-forge engine"
         (engine / "scripts").mkdir(parents=True)
+        # The installer resolves its engine directory. Match that canonical
+        # path so macOS (/var -> /private/var) and Windows short paths compare
+        # against the exact hook command it writes.
+        engine = engine.resolve()
         preserved = engine / "scripts" / "local-note.txt"
         preserved.write_text("do not remove", encoding="utf-8")
 
