@@ -1375,7 +1375,8 @@ def cmd_update(
 
     record_id = _next_record_id(p, prefix)
     path = p[section] / f"{record_id}-{_slugify(title)}.md"
-    scope_lines = "\n".join(f"- `{item.replace('\\\\', '/')}`" for item in scope) or "- Not linked yet."
+    normalized_scope = [item.replace("\\", "/") for item in scope]
+    scope_lines = "\n".join(f"- `{item}`" for item in normalized_scope) or "- Not linked yet."
     heading = {"decision": "Decision", "requirement": "Requirement", "technical": "Observed behavior", "question": "Question"}[kind]
     text = (
         "---\n"
