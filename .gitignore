@@ -1,0 +1,5 @@
+__pycache__/
+*.py[cod]
+
+# Runtime state belongs to a repository enrolled with Context Forge, not this skill source.
+.brain/.state/

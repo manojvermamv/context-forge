@@ -1,6 +1,6 @@
 # Log
 
-Approved chronological project-memory record. Lifecycle hooks do **not** write here directly: they stage secret-screened candidates in `.brain/.state/pending/`. A developer or agent must inspect a candidate with `brain.py review <repo> --pending` and explicitly promote it with `--approve <candidate-id>` before it appears here.
+Approved chronological project-memory record. Lifecycle hooks do **not** write here directly: they stage secret-screened candidates in `.brain/.state/pending/`. A developer or agent must inspect a candidate with `brain.py review <repo> --pending` and explicitly promote it with `--approve <candidate-id>` before it appears here. Direct user-approved decisions belong in their own `decisions/` or `requirements/` record with compact evidence, not as a reconstructed chat transcript.
 
 Entries older than `BRAIN_LOG_ROTATE_DAYS` (default 14) are only moved to `concepts/log-summary-*.md` after reviewing the plan and running `brain.py consolidate <repo> --apply`.
 

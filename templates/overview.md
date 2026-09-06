@@ -1,11 +1,11 @@
 # Overview — {{REPO}}
 
-_High-level narrative summary of what this project is and how it's organized. Written and kept
-current by the LLM in collaboration with you. See SKILL.md's "scan" workflow for how this gets
-filled in the first time, and "sync" for how it's kept honest after manual changes._
+_High-level narrative summary of what this project is and how it is organized. Keep it current
+in collaboration with the project owner. `scan` establishes technical facts; use `sync` after
+external changes. Do not infer product intent from the codebase._
 
 ## What this project is
-_(fill in during the first `/context-forge scan` — one paragraph, plain language)_
+_(fill in after the first scan — one paragraph, plain language)_
 
 ## Architecture at a glance
 _(narrative gloss on top of map.md's generated structure — the "why", not the "what";

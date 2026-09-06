@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Portable 13-check smoke test for context-forge. It uses only a temporary
-# repository and works on Unix shells and Git Bash (where Python needs native
-# Windows paths).
+# Portable 13-check smoke test for Context Forge. It uses only a temporary
+# repository and runs unchanged on Linux, macOS, and Git Bash (where Python
+# needs native Windows paths).
 set -euo pipefail
 
 ENGINE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

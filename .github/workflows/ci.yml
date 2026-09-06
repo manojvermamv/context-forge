@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Compile Python and validate hook JSON
+        run: >-
+          python -c "import json, pathlib, py_compile; py_compile.compile('install.py', doraise=True); py_compile.compile('scripts/brain.py', doraise=True); [json.loads(path.read_text(encoding='utf-8')) for path in pathlib.Path('hooks').rglob('*.json')]; print('static checks passed')"
+      - name: Run native smoke suite
+        run: python tests/smoke_test.py
+      - name: Run POSIX shell smoke suite
+        if: runner.os != 'Windows'
+        run: bash tests/smoke_test.sh

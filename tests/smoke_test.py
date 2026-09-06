@@ -317,6 +317,67 @@ class ContextForgeSmokeTests(unittest.TestCase):
         self.assertNotIn("concepts/authentication.md", updated)
         self.assertIn("Routing layer:", updated)
 
+    def test_scan_context_and_registry_create_a_portable_baseline(self) -> None:
+        self.run_brain("scan", str(self.repo))
+        for relative in (
+            "status.md", "registry.json", "requirements", "technical",
+            "traceability", "questions", "audit",
+        ):
+            self.assertTrue((self.brain_dir / relative).exists(), relative)
+        registry = json.loads((self.brain_dir / "registry.json").read_text(encoding="utf-8"))
+        self.assertEqual("2.0.0", registry["schema_version"])
+        self.assertTrue(any(record["path"] == "technical/codebase-map.md" for record in registry["records"]))
+
+        context = self.run_brain("context", str(self.repo), "authentication")
+        self.assertIn(".brain/index.md", context.stdout)
+        self.assertIn(".brain/status.md", context.stdout)
+
+        maintenance = self.run_brain("maintain", str(self.repo), "--fix")
+        self.assertIn("maintain clean", maintenance.stdout)
+
+    def test_explicit_user_decisions_are_provenanced_but_code_is_not_intent(self) -> None:
+        accepted = self.run_brain(
+            "update", str(self.repo), "--kind", "decision",
+            "--title", "Use bcrypt for password hashes",
+            "--body", "New password hashes use bcrypt.",
+            "--authority", "user_explicit",
+            "--evidence", "User explicitly selected bcrypt during this task.",
+            "--scope", "src/auth.py", "--accept",
+        )
+        self.assertIn("recorded ADR-001", accepted.stdout)
+        decision = next((self.brain_dir / "decisions").glob("ADR-001-*.md"))
+        content = decision.read_text(encoding="utf-8")
+        self.assertIn("authority: user_explicit", content)
+        self.assertIn("src/auth.py", content)
+        trace = next((self.brain_dir / "traceability").glob("TRACE-001-*.md"))
+        self.assertIn("ADR-001", trace.read_text(encoding="utf-8"))
+
+        rejected = self.run_brain(
+            "update", str(self.repo), "--kind", "requirement",
+            "--title", "Invented scope", "--body", "Agent guessed this.",
+            "--authority", "agent_inference", "--evidence", "No user message.", "--accept",
+            check=False,
+        )
+        self.assertNotEqual(0, rejected.returncode)
+        self.assertIn("requires --authority user_explicit", rejected.stdout)
+
+        technical = self.run_brain(
+            "update", str(self.repo), "--kind", "technical",
+            "--title", "Authentication currently returns true",
+            "--body", "AuthManager.login currently returns True in the sample code.",
+            "--authority", "code_observed", "--evidence", "src/auth.py:2-3",
+            "--scope", "src/auth.py",
+        )
+        self.assertIn("recorded TECH-001", technical.stdout)
+
+    def test_sync_records_only_code_observed_evidence(self) -> None:
+        self.run_brain("sync", str(self.repo), "--path", "src/auth.py", "--apply")
+        record = next((self.brain_dir / "technical").glob("TECH-*-observed-changes-*.md"))
+        content = record.read_text(encoding="utf-8")
+        self.assertIn("authority: code_observed", content)
+        self.assertIn("does not assert product intent", content)
+        self.assertIn("src/auth.py", content)
+
     def test_injection_markers_strip_feedback_and_suppress_only_first_turn(self) -> None:
         session_id = "marker-session"
         start = self.run_brain(
@@ -491,6 +552,12 @@ class ContextForgeSmokeTests(unittest.TestCase):
         self.assertIn(str(engine), agents)
         self.assertNotIn("~/.context-forge", (engine / "SKILL.md").read_text(encoding="utf-8"))
         self.assertIn("/hooks", first.stdout)
+        copilot = (self.repo / ".github" / "copilot-instructions.md").read_text(encoding="utf-8")
+        claude_adapter = (self.repo / "CLAUDE.md").read_text(encoding="utf-8")
+        self.assertEqual(1, copilot.count("<!-- BEGIN context-forge -->"))
+        self.assertIn("portable", copilot)
+        self.assertEqual(1, claude_adapter.count("<!-- BEGIN context-forge -->"))
+        self.assertIn("AGENTS.md", claude_adapter)
 
         # Exercise the exact Windows override written to Codex hooks rather
         # than merely inspecting its text. The custom engine path includes a

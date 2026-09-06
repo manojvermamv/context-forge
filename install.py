@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Install context-forge hooks for Claude Code and/or Codex.
+"""Install Context Forge's portable project-knowledge workflow.
 
-The engine is installed once (``~/.context-forge`` by default) and hook
-settings point at it. JSON settings are reconciled: unrelated hook groups are
-preserved, while prior context-forge groups are refreshed without duplicates.
+The engine is installed once (``~/.context-forge`` by default). Optional Claude
+Code and Codex hooks point at it, while project scope also adds a preserved
+portable workflow block to agent instruction files. JSON hook settings are
+reconciled: unrelated groups are preserved, and prior Context Forge groups are
+refreshed without duplicates.
 """
 from __future__ import annotations
 
@@ -20,6 +22,10 @@ HERE = Path(__file__).resolve().parent
 ENGINE_DEFAULT = Path.home() / ".context-forge"
 AGENTS_MARKER_START = "<!-- BEGIN context-forge -->"
 AGENTS_MARKER_END = "<!-- END context-forge -->"
+COPILOT_MARKER_START = "<!-- BEGIN context-forge -->"
+COPILOT_MARKER_END = "<!-- END context-forge -->"
+CLAUDE_MARKER_START = "<!-- BEGIN context-forge -->"
+CLAUDE_MARKER_END = "<!-- END context-forge -->"
 DEFAULT_UNIX_SCRIPT = '"$HOME/.context-forge/scripts/brain.py"'
 DEFAULT_WINDOWS_SCRIPT = "(Join-Path $HOME '.context-forge\\scripts\\brain.py')"
 
@@ -182,17 +188,37 @@ def wire_claude_skill(skills_dir: Path, engine_dir: Path) -> None:
     print(f"[install] Claude Code skill -> {skills_dir / 'context-forge' / 'SKILL.md'}")
 
 
-def append_agents_block(agents_md: Path, engine_dir: Path) -> None:
-    body = _render_engine_references((HERE / "AGENTS.md.snippet.md").read_text(encoding="utf-8"), engine_dir)
-    block = f"{AGENTS_MARKER_START}\n{body.strip()}\n{AGENTS_MARKER_END}\n"
-    if agents_md.exists():
-        text = agents_md.read_text(encoding="utf-8")
-        pattern = re.escape(AGENTS_MARKER_START) + r".*?" + re.escape(AGENTS_MARKER_END) + r"\n?"
-        text = re.sub(pattern, lambda _: block, text, flags=re.S) if AGENTS_MARKER_START in text else text.rstrip() + "\n\n" + block
+def append_marked_block(target: Path, body: str, start: str, end: str, label: str) -> None:
+    """Add or replace only Context Forge's own instructions."""
+    block = f"{start}\n{body.strip()}\n{end}\n"
+    if target.exists():
+        text = target.read_text(encoding="utf-8")
+        pattern = re.escape(start) + r".*?" + re.escape(end) + r"\n?"
+        text = re.sub(pattern, lambda _: block, text, flags=re.S) if start in text else text.rstrip() + "\n\n" + block
     else:
         text = block
-    _atomic_write(agents_md, text)
-    print(f"[install] AGENTS.md block -> {agents_md}")
+    _atomic_write(target, text)
+    print(f"[install] {label} block -> {target}")
+
+
+def append_agents_block(agents_md: Path, engine_dir: Path) -> None:
+    body = _render_engine_references((HERE / "AGENTS.md.snippet.md").read_text(encoding="utf-8"), engine_dir)
+    append_marked_block(agents_md, body, AGENTS_MARKER_START, AGENTS_MARKER_END, "AGENTS.md")
+
+
+def append_portable_adapters(repo: Path, engine_dir: Path) -> None:
+    """Keep one portable protocol, with small host-specific entry points."""
+    body = _render_engine_references((HERE / "AGENTS.md.snippet.md").read_text(encoding="utf-8"), engine_dir)
+    append_marked_block(repo / "AGENTS.md", body, AGENTS_MARKER_START, AGENTS_MARKER_END, "AGENTS.md")
+    append_marked_block(repo / ".github" / "copilot-instructions.md", body,
+                        COPILOT_MARKER_START, COPILOT_MARKER_END, "Copilot instructions")
+    claude_body = (
+        "# Context Forge\n\n"
+        "Follow the repository `AGENTS.md` Context Forge block. It is the canonical, "
+        "portable workflow; do not duplicate or weaken it here.\n"
+    )
+    append_marked_block(repo / "CLAUDE.md", claude_body,
+                        CLAUDE_MARKER_START, CLAUDE_MARKER_END, "CLAUDE.md")
 
 
 def main(argv=None) -> int:
@@ -223,8 +249,13 @@ def main(argv=None) -> int:
         print("[install] Codex: run `/hooks` once to review and trust every new or changed "
               "context-forge definition; untrusted hooks are skipped until then.")
 
-    print("\n[install] Per-repository activation remains deliberate. Enroll a repository with:\n"
-          f"    python3 {shlex.quote(str(engine_dir / 'scripts' / 'brain.py'))} init /path/to/repo")
+    if args.scope == "project":
+        append_portable_adapters(repo, engine_dir)
+
+    brain = shlex.quote(str(engine_dir / "scripts" / "brain.py"))
+    print("\n[install] Per-repository activation remains deliberate. Enroll and baseline a repository with:\n"
+          f"    python3 {brain} init /path/to/repo\n"
+          f"    python3 {brain} scan /path/to/repo")
     return 0
 
 

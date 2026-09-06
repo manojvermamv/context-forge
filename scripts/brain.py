@@ -2,9 +2,9 @@
 """
 brain.py — the context-forge engine.
 
-A single, zero-dependency (stdlib-only) CLI that implements a self-evolving,
-token-budgeted "second brain" for a project codebase, driven by Claude Code
-and Codex lifecycle hooks.
+A single, zero-dependency (stdlib-only) CLI that implements a portable,
+token-budgeted project knowledge base. Claude Code and Codex hooks are optional
+accelerators; every workflow also works through Markdown, JSON, and CLI commands.
 
 Why one file, stdlib-only: every mature prior-art implementation researched
 for this project converges on the same rule — a memory engine that needs a
@@ -14,20 +14,22 @@ CLI"; Hindsight ships "zero pip install".) This follows the same rule with
 Python instead, since Python is already required by most coding-agent tooling
 and needs no compile step.
 
-Design lineage (see README.md "References" for the full list): the three-layer
-model (raw / wiki / schema) and the ingest/query/lint operations are Andrej
-Karpathy's llm-wiki pattern. The hook wiring, token budgets, deterministic
-lint before gated generative review, and the "matcher stays broad, the script
-branches" rule are adapted from suwonleee/llmwiki's production implementation
-and its Sept 2026 operational postmortem. The requirements/decisions/
-traceability split and progressive-disclosure INDEX routing are adapted from
-giodra96/project-wiki. None of this vendors their code — it's an independent,
-from-scratch implementation of the same *patterns*.
+Design lineage (see README.md "References" for the full list): progressive
+disclosure, local indexing, and deterministic linting follow the llm-wiki
+pattern. Hook wiring, token budgets, gated review, and broad matcher/narrow
+handler design are informed by llmwiki. The requirements/decisions/technical/
+traceability split and index-first routing are informed by project-wiki. This
+is an independent, from-scratch implementation of those patterns.
 
 Subcommands:
   init            <repo>                 scaffold .brain/ for a repository
+  scan            <repo>                 create a code-observed technical baseline
   map             <repo>                 regenerate the deterministic code map
-  index           <repo>                 rebuild the local search index
+  index           <repo>                 rebuild routes, registry, and local search index
+  context         <repo> [task]          print the smallest useful reading list
+  update          <repo>                 record an explicit durable knowledge item
+  sync            <repo> [--apply]       reconcile changed code as observed evidence
+  maintain        <repo> [--fix]         validate the portable knowledge base
   session-start                          hook: SessionStart -> additionalContext
   turn-inject                            hook: UserPromptSubmit -> pointers
   guard                                  hook: PreToolUse -> protect generated files
@@ -88,6 +90,7 @@ INJECTION_SUPPRESSION_SECONDS = _envint("BRAIN_INJECTION_SUPPRESSION_SECONDS", 1
 
 BRAIN_DIR = ".brain"
 STATE_DIR = ".state"          # under .brain/, gitignored — regenerable
+BRAIN_SCHEMA_VERSION = "2.0.0"
 IGNORE_DIRS = {
     ".git", ".brain", "node_modules", "__pycache__", ".venv", "venv",
     "dist", "build", ".next", ".turbo", "target", ".pytest_cache",
@@ -165,14 +168,22 @@ def brain_paths(repo: Path):
         "map": b / "map.md",
         "index_md": b / "index.md",
         "overview": b / "overview.md",
+        "status": b / "status.md",
         "log": b / "log.md",
         "decisions": b / "decisions",
         "concepts": b / "concepts",
+        "requirements": b / "requirements",
+        "technical": b / "technical",
+        "traceability": b / "traceability",
+        "questions": b / "questions",
+        "audit": b / "audit",
+        "registry": b / "registry.json",
         "state": b / STATE_DIR,
         "pending": b / STATE_DIR / "pending",
         "approved": b / STATE_DIR / "approved",
         "discarded": b / STATE_DIR / "discarded",
         "reviews": b / STATE_DIR / "reviews",
+        "reports": b / STATE_DIR / "reports",
         "injections": b / STATE_DIR / "injections",
         "search_index_json": b / STATE_DIR / "index.json",
         "search_index_db": b / STATE_DIR / "index.sqlite",
@@ -273,14 +284,15 @@ def cmd_init(repo: Path, force: bool = False) -> None:
     if p["root"].exists() and not force:
         print(f"[brain] {p['root']} already exists (use --force only to replace template-managed root files)")
     p["root"].mkdir(parents=True, exist_ok=True)
-    p["decisions"].mkdir(exist_ok=True)
-    p["concepts"].mkdir(exist_ok=True)
+    for key in ("decisions", "concepts", "requirements", "technical", "traceability", "questions", "audit"):
+        p[key].mkdir(exist_ok=True)
     p["state"].mkdir(exist_ok=True)
 
     defaults = {
         "current-state.md": (TEMPLATES_DIR / "current-state.md"),
         "index.md": (TEMPLATES_DIR / "index.md"),
         "overview.md": (TEMPLATES_DIR / "overview.md"),
+        "status.md": (TEMPLATES_DIR / "status.md"),
         "log.md": (TEMPLATES_DIR / "log.md"),
     }
     for name, tpl in defaults.items():
@@ -293,7 +305,7 @@ def cmd_init(repo: Path, force: bool = False) -> None:
 
     if not p["config"].exists():
         atomic_write(p["config"], json.dumps({
-            "schema_version": "1.0.0",
+            "schema_version": BRAIN_SCHEMA_VERSION,
             "created": now_iso(),
             "repo_name": repo.name,
             "budgets": {
@@ -301,6 +313,7 @@ def cmd_init(repo: Path, force: bool = False) -> None:
                 "map_chars": MAP_BUDGET_CHARS,
                 "topic_chars": TOPIC_BUDGET_CHARS,
             },
+            "decision_capture": "review",
         }, indent=2) + "\n")
 
     # .gitignore the regenerable local state, keep the wiki itself tracked
@@ -487,6 +500,63 @@ def _fts5_available() -> bool:
 ROUTE_BEGIN = "<!-- context-forge:auto-routes:begin -->"
 ROUTE_END = "<!-- context-forge:auto-routes:end -->"
 
+ROUTED_SECTIONS = (
+    ("Decisions", "decisions"),
+    ("Requirements", "requirements"),
+    ("Technical knowledge", "technical"),
+    ("Traceability", "traceability"),
+    ("Open questions", "questions"),
+    ("Concepts", "concepts"),
+)
+
+
+def _frontmatter_value(text: str, key: str) -> str:
+    """Read a simple YAML-style frontmatter value without adding PyYAML."""
+    if not text.startswith("---\n"):
+        return ""
+    end = text.find("\n---", 4)
+    if end < 0:
+        return ""
+    match = re.search(rf"(?m)^{re.escape(key)}:\s*(.+?)\s*$", text[4:end])
+    return match.group(1).strip().strip('"\'') if match else ""
+
+
+def _record_kind(path: Path, root: Path) -> str:
+    try:
+        first = path.relative_to(root).parts[0]
+    except ValueError:
+        return "core"
+    return {
+        "decisions": "decision", "requirements": "requirement",
+        "technical": "technical", "traceability": "traceability",
+        "questions": "question", "concepts": "concept",
+    }.get(first, "core")
+
+
+def _write_registry(repo: Path, p: dict) -> None:
+    """Generate a small machine-readable catalog from the portable Markdown wiki."""
+    records = []
+    for page in sorted(p["root"].rglob("*.md")):
+        if STATE_DIR in page.parts:
+            continue
+        text = read_text(page)
+        records.append({
+            "path": page.relative_to(p["root"]).as_posix(),
+            "id": _frontmatter_value(text, "id"),
+            "kind": _record_kind(page, p["root"]),
+            "title": _first_heading(text) or page.stem,
+            "status": _frontmatter_value(text, "status"),
+            "authority": _frontmatter_value(text, "authority"),
+            "updated": _frontmatter_value(text, "updated") or _frontmatter_value(text, "date"),
+        })
+    payload = {
+        "schema_version": BRAIN_SCHEMA_VERSION,
+        "generated_at": now_iso(),
+        "root": BRAIN_DIR,
+        "records": records,
+    }
+    atomic_write(p["registry"], json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
 
 def _sync_routing_index(p: dict) -> None:
     """Refresh only the generated on-demand routes in index.md.
@@ -499,25 +569,19 @@ def _sync_routing_index(p: dict) -> None:
     if not original:
         return
 
-    lines = [ROUTE_BEGIN, "### Decisions (`decisions/`)"]
-    decision_pages = sorted(p["decisions"].glob("*.md")) if p["decisions"].exists() else []
-    if decision_pages:
-        for page in decision_pages:
-            title = _first_heading(read_text(page)) or page.stem
-            title = title.replace("[", "\\[").replace("]", "\\]")
-            lines.append(f"- [{title}]({page.relative_to(p['root']).as_posix()})")
-    else:
-        lines.append("_(none yet)_")
-
-    lines += ["", "### Concepts (`concepts/`)"]
-    concept_pages = sorted(p["concepts"].glob("*.md")) if p["concepts"].exists() else []
-    if concept_pages:
-        for page in concept_pages:
-            title = _first_heading(read_text(page)) or page.stem
-            title = title.replace("[", "\\[").replace("]", "\\]")
-            lines.append(f"- [{title}]({page.relative_to(p['root']).as_posix()})")
-    else:
-        lines.append("_(none yet)_")
+    lines = [ROUTE_BEGIN]
+    for label, key in ROUTED_SECTIONS:
+        lines += [f"### {label} (`{key}/`)"]
+        section = p[key]
+        pages = sorted(section.rglob("*.md")) if section.exists() else []
+        if pages:
+            for page in pages:
+                title = _first_heading(read_text(page)) or page.stem
+                title = title.replace("[", "\\[").replace("]", "\\]")
+                lines.append(f"- [{title}]({page.relative_to(p['root']).as_posix()})")
+        else:
+            lines.append("_(none yet)_")
+        lines.append("")
     lines.append(ROUTE_END)
     generated = "\n".join(lines)
 
@@ -534,6 +598,7 @@ def _sync_routing_index(p: dict) -> None:
 def cmd_index(repo: Path) -> None:
     p = brain_paths(repo)
     _sync_routing_index(p)
+    _write_registry(repo, p)
     docs = []
     for md in p["root"].rglob("*.md"):
         if STATE_DIR in md.parts:
@@ -1161,6 +1226,256 @@ def cmd_approve_candidate(repo: Path, candidate_id: str) -> int:
     print(f"[brain] approved candidate {candidate_id}; canonical hot memory and index refreshed")
     return 0
 
+
+# --------------------------------------------------------------------------
+# Portable knowledge base workflows. These commands deliberately separate
+# user-approved intent from code-observed facts. Hooks never claim to know
+# who approved a decision; only the active agent workflow can do that.
+# --------------------------------------------------------------------------
+
+def _slugify(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return slug[:72] or "record"
+
+
+def _next_record_id(p: dict, prefix: str) -> str:
+    highest = 0
+    for page in p["root"].rglob("*.md"):
+        match = re.search(rf"(?m)^id:\s*{re.escape(prefix)}-(\d+)\s*$", read_text(page))
+        if match:
+            highest = max(highest, int(match.group(1)))
+    return f"{prefix}-{highest + 1:03d}"
+
+
+def _clean_record_value(value: str, label: str) -> str:
+    cleaned = screen_secrets(value).strip()
+    if not cleaned:
+        raise ValueError(f"{label} must not be empty")
+    if "[REDACTED]" in cleaned:
+        raise ValueError(f"{label} appears to contain a secret; write a sanitized record instead")
+    return cleaned
+
+
+def _append_audit(p: dict, action: str, record: Path, detail: str) -> None:
+    path = p["audit"] / f"knowledge-{today()}.md"
+    if not path.exists():
+        atomic_write(path, f"# Knowledge Audit — {today()}\n")
+    entry = f"\n## {now_iso()} — {action}\n\n- Record: `{record.relative_to(p['root']).as_posix()}`\n- {detail}\n"
+    atomic_write(path, read_text(path).rstrip() + entry)
+
+
+def _write_traceability(p: dict, record_id: str, title: str, scope: list[str]) -> Path | None:
+    """Create a compact, deterministic link record when durable intent names code."""
+    if not scope:
+        return None
+    trace_id = _next_record_id(p, "TRACE")
+    destination = p["traceability"] / f"{trace_id}-{_slugify(title)}.md"
+    paths = "\n".join(f"- `{item.replace(chr(92), '/')}`" for item in scope)
+    atomic_write(destination, "---\n"
+        f"id: {trace_id}\nstatus: linked\nauthority: derived_link\nupdated: {today()}\n---\n\n"
+        f"# Traceability — {title}\n\n## Source record\n\n- `{record_id}`\n\n"
+        f"## Related paths\n\n{paths}\n")
+    return destination
+
+
+def cmd_scan(repo: Path) -> int:
+    """Create a conservative first technical baseline from the codebase.
+
+    It records only facts that can be observed locally; it never invents
+    requirements or decisions from the current implementation.
+    """
+    p = brain_paths(repo)
+    if not p["root"].exists():
+        cmd_init(repo)
+    cmd_map(repo)
+    map_record = p["technical"] / "codebase-map.md"
+    if not map_record.exists():
+        atomic_write(map_record, "---\n"
+            "id: TECH-CODEBASE-MAP\nstatus: observed\nauthority: code_observed\n"
+            f"updated: {today()}\n---\n\n# Codebase Map\n\n"
+            "The generated [code map](../map.md) is the authoritative structural view. "
+            "This record exists so any agent can route to it without treating source "
+            "structure as product intent.\n\n## Evidence\n\n- Deterministic local scan of the repository.\n")
+    test_files = []
+    for candidate in repo.rglob("test_*.py"):
+        if not any(part in IGNORE_DIRS for part in candidate.parts):
+            test_files.append(candidate.relative_to(repo).as_posix())
+    testing = p["technical"] / "testing.md"
+    if not testing.exists():
+        bullets = "\n".join(f"- `{item}`" for item in sorted(test_files)[:40]) or "- No conventional test files were detected."
+        atomic_write(testing, "---\n"
+            "id: TECH-TESTING\nstatus: observed\nauthority: code_observed\n"
+            f"updated: {today()}\n---\n\n# Testing\n\n"
+            "This is a code-observed starting point, not a statement of required quality.\n\n"
+            "## Detected test files\n\n" + bullets + "\n")
+    _append_audit(p, "scan", map_record, "Created a deterministic technical baseline; no requirements or decisions were inferred.")
+    cmd_index(repo)
+    print(f"[brain] scan complete — technical baseline is available under {p['technical'].relative_to(repo)}")
+    return 0
+
+
+def cmd_context(repo: Path, query: str = "", paths: list[str] | None = None) -> None:
+    """Give any agent a bounded, copyable reading list without requiring hooks."""
+    p = brain_paths(repo)
+    if not p["root"].exists():
+        print(f"[brain] {repo} is not initialized — run `brain.py init {repo}`")
+        return
+    if not (p["search_index_db"].exists() or p["search_index_json"].exists()):
+        cmd_index(repo)
+    selected = [f"{BRAIN_DIR}/index.md", f"{BRAIN_DIR}/current-state.md", f"{BRAIN_DIR}/status.md"]
+    terms = " ".join([query, *(paths or [])]).strip()
+    for hit in search_index(repo, terms, limit=TURN_MAX_POINTERS) if terms else []:
+        if hit["path"] not in selected:
+            selected.append(hit["path"])
+    print("Read these files, in order:")
+    for item in selected:
+        print(f"- {item}")
+    if terms and len(selected) == 3:
+        print("- No confident routed match; use map.md before broad source exploration.")
+
+
+def cmd_update(
+    repo: Path, kind: str, title: str, body: str, authority: str,
+    evidence: str, scope: list[str], accept: bool,
+) -> int:
+    """Write one deliberate knowledge record with provenance.
+
+    Accepted requirements and decisions are allowed only when an active agent
+    has explicit user evidence. This is intentionally not callable by hooks.
+    """
+    p = brain_paths(repo)
+    if not p["root"].exists():
+        print(f"[brain] {repo} is not initialized — run `brain.py init {repo}`")
+        return 1
+    try:
+        title = _clean_record_value(title, "title")
+        body = _clean_record_value(body, "body")
+        evidence = _clean_record_value(evidence, "evidence") if evidence else "Not supplied."
+    except ValueError as exc:
+        print(f"[brain] update rejected: {exc}")
+        return 1
+
+    policy = {
+        "decision": ("ADR", "decisions", "accepted"),
+        "requirement": ("REQ", "requirements", "accepted"),
+        "technical": ("TECH", "technical", "observed"),
+        "question": ("Q", "questions", "open"),
+    }
+    prefix, section, status = policy[kind]
+    if kind in ("decision", "requirement") and (authority != "user_explicit" or not accept):
+        print("[brain] update rejected: accepted intent requires --authority user_explicit, "
+              "--evidence, and --accept. Record ambiguity as a question instead.")
+        return 1
+    if kind == "technical" and authority != "code_observed":
+        print("[brain] update rejected: technical records must use --authority code_observed")
+        return 1
+    if kind == "question" and authority not in ("unresolved", "agent_inference", "user_explicit"):
+        print("[brain] update rejected: questions must remain unresolved or cite explicit user context")
+        return 1
+
+    record_id = _next_record_id(p, prefix)
+    path = p[section] / f"{record_id}-{_slugify(title)}.md"
+    scope_lines = "\n".join(f"- `{item.replace('\\\\', '/')}`" for item in scope) or "- Not linked yet."
+    heading = {"decision": "Decision", "requirement": "Requirement", "technical": "Observed behavior", "question": "Question"}[kind]
+    text = (
+        "---\n"
+        f"id: {record_id}\nstatus: {status}\nauthority: {authority}\n"
+        f"updated: {today()}\n---\n\n# {title}\n\n"
+        f"## {heading}\n\n{body}\n\n## Evidence\n\n{evidence}\n\n"
+        f"## Related paths\n\n{scope_lines}\n"
+    )
+    atomic_write(path, text)
+    _append_audit(p, f"record {kind}", path, f"Authority: `{authority}`; status: `{status}`.")
+    trace = _write_traceability(p, record_id, title, scope) if kind in ("decision", "requirement") else None
+    if trace:
+        _append_audit(p, "traceability", trace, f"Linked `{record_id}` to {len(scope)} path(s).")
+    cmd_index(repo)
+    print(f"[brain] recorded {record_id} at {path.relative_to(repo)}")
+    return 0
+
+
+def _git_changed_paths(repo: Path) -> list[str]:
+    result = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain"], text=True,
+        capture_output=True, encoding="utf-8", errors="replace", check=False,
+    )
+    if result.returncode:
+        return []
+    paths = []
+    for line in result.stdout.splitlines():
+        if len(line) >= 4:
+            paths.append(line[3:].split(" -> ")[-1].replace("\\", "/"))
+    return sorted(set(paths))
+
+
+def cmd_sync(repo: Path, explicit_paths: list[str], apply: bool) -> int:
+    """Reconcile manual/external source changes as code-observed evidence."""
+    p = brain_paths(repo)
+    if not p["root"].exists():
+        print(f"[brain] {repo} is not initialized — run `brain.py init {repo}`")
+        return 1
+    changed = sorted(set(explicit_paths or _git_changed_paths(repo)))
+    if not changed:
+        print("[brain] sync found no changed paths; pass --path for files changed outside Git.")
+        return 0
+    report = p["reports"] / f"sync-{today()}.json"
+    p["reports"].mkdir(parents=True, exist_ok=True)
+    atomic_write(report, json.dumps({"generated_at": now_iso(), "paths": changed}, indent=2) + "\n")
+    if not apply:
+        print(f"[brain] sync plan: {len(changed)} changed paths; inspect {report.relative_to(repo)} then rerun with --apply")
+        return 0
+    record_id = _next_record_id(p, "TECH")
+    destination = p["technical"] / f"{record_id}-observed-changes-{today()}.md"
+    lines = "\n".join(f"- `{item}`" for item in changed)
+    atomic_write(destination, "---\n"
+        f"id: {record_id}\nstatus: observed\nauthority: code_observed\nupdated: {today()}\n---\n\n"
+        f"# Observed Changes — {today()}\n\n"
+        "These paths changed outside the current agent workflow. This record documents observed "
+        "state only; it does not assert product intent or approve a decision.\n\n"
+        f"## Related paths\n\n{lines}\n\n## Evidence\n\n- `{report.relative_to(repo).as_posix()}`\n")
+    _append_audit(p, "sync", destination, f"Recorded {len(changed)} externally changed paths as technical evidence.")
+    cmd_map(repo)
+    cmd_index(repo)
+    print(f"[brain] sync applied — recorded {len(changed)} changed paths as code-observed evidence")
+    return 0
+
+
+def cmd_maintain(repo: Path, fix: bool = False) -> int:
+    """Run deterministic health checks; never makes semantic claims."""
+    p = brain_paths(repo)
+    if not p["root"].exists():
+        print(f"[brain] {repo} is not initialized — run `brain.py init {repo}`")
+        return 1
+    if fix:
+        cmd_map(repo)
+        cmd_index(repo)
+    issues = [line for line in cmd_lint(repo) if not line.startswith("clean —")]
+    registry = _read_json(p["registry"], {})
+    records = registry.get("records", []) if isinstance(registry, dict) else []
+    seen_ids: set[str] = set()
+    for record in records:
+        if not isinstance(record, dict):
+            issues.append("registry contains an invalid record")
+            continue
+        path = record.get("path", "")
+        if not isinstance(path, str) or not (p["root"] / path).is_file():
+            issues.append(f"registry points to a missing file: {path}")
+        record_id = record.get("id", "")
+        if record_id:
+            if record_id in seen_ids:
+                issues.append(f"duplicate record id: {record_id}")
+            seen_ids.add(record_id)
+    p["reports"].mkdir(parents=True, exist_ok=True)
+    report = p["reports"] / "maintain.json"
+    atomic_write(report, json.dumps({"generated_at": now_iso(), "fixed": fix, "issues": issues}, indent=2) + "\n")
+    if issues:
+        print(f"[brain] maintain found {len(issues)} issue(s); see {report.relative_to(repo)}")
+        for issue in issues:
+            print(f"- {issue}")
+        return 1
+    print(f"[brain] maintain clean; report: {report.relative_to(repo)}")
+    return 0
+
 # lint — deterministic, zero LLM. Run it on demand after deliberate wiki edits.
 # --------------------------------------------------------------------------
 
@@ -1170,7 +1485,10 @@ def cmd_lint(repo: Path) -> list:
     if not p["root"].exists():
         return [f"{repo} is not initialized (run `brain.py init {repo}`)"]
 
-    all_pages = {str(m.relative_to(repo)).replace("\\", "/") for m in p["root"].rglob("*.md") if STATE_DIR not in m.parts}
+    all_pages = {
+        str(m.relative_to(repo)).replace("\\", "/") for m in p["root"].rglob("*.md")
+        if STATE_DIR not in m.parts and p["audit"] not in m.parents
+    }
     linked = set()
     for source in (p["index_md"], p["overview"]):
         for destination in re.findall(r"\]\(([^)#\s]+\.md)(?:#[^)]*)?\)", read_text(source)):
@@ -1182,12 +1500,12 @@ def cmd_lint(repo: Path) -> list:
                 continue
 
     core = {f"{BRAIN_DIR}/current-state.md", f"{BRAIN_DIR}/index.md",
-            f"{BRAIN_DIR}/overview.md", f"{BRAIN_DIR}/log.md", f"{BRAIN_DIR}/map.md"}
+            f"{BRAIN_DIR}/overview.md", f"{BRAIN_DIR}/status.md", f"{BRAIN_DIR}/log.md", f"{BRAIN_DIR}/map.md"}
     orphans = all_pages - linked - core
     for o in sorted(orphans):
         problems.append(f"orphan page (not referenced from index.md/overview.md): {o}")
 
-    for page in (p["decisions"], p["concepts"]):
+    for page in (p["decisions"], p["concepts"], p["requirements"], p["technical"], p["traceability"], p["questions"]):
         if not page.exists():
             continue
         for f in page.glob("*.md"):
@@ -1380,7 +1698,9 @@ def cmd_doctor(repo: Path) -> None:
 
     n_decisions = len(list(p["decisions"].glob("*.md"))) if p["decisions"].exists() else 0
     n_concepts = len(list(p["concepts"].glob("*.md"))) if p["concepts"].exists() else 0
-    print(f"decisions: {n_decisions} pages · concepts: {n_concepts} pages")
+    n_requirements = len(list(p["requirements"].rglob("*.md"))) if p["requirements"].exists() else 0
+    n_technical = len(list(p["technical"].rglob("*.md"))) if p["technical"].exists() else 0
+    print(f"decisions: {n_decisions} · requirements: {n_requirements} · technical: {n_technical} · concepts: {n_concepts} pages")
 
     print("\nlint:")
     for line in cmd_lint(repo):
@@ -1400,7 +1720,8 @@ def cmd_status(repo: Path) -> None:
     m = re.search(r"Last updated ([\dT:\-Z]+)", read_text(p["current_state"]))
     if m:
         cs_age = m.group(1)
-    print(f"initialized · current-state last updated {cs_age} · "
+    registry = "registry" if p["registry"].exists() else "NO registry"
+    print(f"initialized · current-state last updated {cs_age} · {registry} · "
           f"{'indexed' if (p['search_index_db'].exists() or p['search_index_json'].exists()) else 'NOT indexed'}")
 
 
@@ -1422,6 +1743,34 @@ def main(argv=None) -> int:
 
     p_index = sub.add_parser("index")
     p_index.add_argument("repo", type=Path)
+
+    p_scan = sub.add_parser("scan")
+    p_scan.add_argument("repo", type=Path)
+
+    p_context = sub.add_parser("context")
+    p_context.add_argument("repo", type=Path)
+    p_context.add_argument("query", nargs="*", help="task words for a routed reading list")
+    p_context.add_argument("--path", dest="paths", action="append", default=[], help="affected source path")
+
+    p_update = sub.add_parser("update")
+    p_update.add_argument("repo", type=Path)
+    p_update.add_argument("--kind", choices=["decision", "requirement", "technical", "question"], required=True)
+    p_update.add_argument("--title", required=True)
+    p_update.add_argument("--body", required=True)
+    p_update.add_argument("--authority", required=True,
+                          choices=["user_explicit", "code_observed", "unresolved", "agent_inference", "external_source"])
+    p_update.add_argument("--evidence", default="")
+    p_update.add_argument("--scope", action="append", default=[])
+    p_update.add_argument("--accept", action="store_true", help="publish explicit user-approved intent")
+
+    p_sync = sub.add_parser("sync")
+    p_sync.add_argument("repo", type=Path)
+    p_sync.add_argument("--path", dest="paths", action="append", default=[], help="changed path when Git cannot report it")
+    p_sync.add_argument("--apply", action="store_true", help="write a code-observed technical record")
+
+    p_maintain = sub.add_parser("maintain")
+    p_maintain.add_argument("repo", type=Path)
+    p_maintain.add_argument("--fix", action="store_true", help="regenerate map, routes, and registry before validation")
 
     sub.add_parser("session-start")
     sub.add_parser("turn-inject")
@@ -1457,10 +1806,21 @@ def main(argv=None) -> int:
 
     if args.cmd == "init":
         cmd_init(args.repo, args.force)
+    elif args.cmd == "scan":
+        return cmd_scan(args.repo)
     elif args.cmd == "map":
         cmd_map(args.repo)
     elif args.cmd == "index":
         cmd_index(args.repo)
+    elif args.cmd == "context":
+        cmd_context(args.repo, " ".join(args.query), args.paths)
+    elif args.cmd == "update":
+        return cmd_update(args.repo, args.kind, args.title, args.body, args.authority,
+                          args.evidence, args.scope, args.accept)
+    elif args.cmd == "sync":
+        return cmd_sync(args.repo, args.paths, args.apply)
+    elif args.cmd == "maintain":
+        return cmd_maintain(args.repo, args.fix)
     elif args.cmd == "session-start":
         cmd_session_start()
     elif args.cmd == "turn-inject":
