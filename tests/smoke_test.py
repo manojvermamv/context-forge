@@ -559,28 +559,37 @@ class ContextForgeSmokeTests(unittest.TestCase):
         self.assertEqual(1, claude_adapter.count("<!-- BEGIN context-forge -->"))
         self.assertIn("AGENTS.md", claude_adapter)
 
-        # Exercise the exact Windows override written to Codex hooks rather
-        # than merely inspecting its text. The custom engine path includes a
-        # space, which catches quoting regressions as well as launcher issues.
+        # The custom engine path includes a space. On Windows, execute the
+        # generated override; elsewhere, assert the PowerShell argument is
+        # still quoted without requiring PowerShell to be installed.
         codex_config = json.loads(codex_hooks.read_text(encoding="utf-8"))
         windows_command = owned_handlers(codex_config, "SessionStart")[0]["commandWindows"]
-        windows_run = subprocess.run(
-            windows_command,
-            input=json.dumps({
-                "hook_event_name": "SessionStart",
-                "source": "startup",
-                "cwd": str(self.repo),
-                "session_id": "windows-hook-smoke",
-            }),
-            text=True,
-            capture_output=True,
-            encoding="utf-8",
-            errors="replace",
-            cwd=str(self.repo),
-            shell=True,
-        )
-        self.assertEqual(0, windows_run.returncode, windows_run.stdout + windows_run.stderr)
-        self.assertIn("additionalContext", windows_run.stdout)
+        script_path = str(engine / "scripts" / "brain.py")
+        powershell_path = "'" + script_path.replace("'", "''") + "'"
+        self.assertIn(powershell_path, windows_command)
+        if os.name == "nt":
+            windows_run = subprocess.run(
+                windows_command,
+                input=json.dumps({
+                    "hook_event_name": "SessionStart",
+                    "source": "startup",
+                    "cwd": str(self.repo),
+                    "session_id": "windows-hook-smoke",
+                }),
+                text=True,
+                capture_output=True,
+                encoding="utf-8",
+                errors="replace",
+                cwd=str(self.repo),
+                shell=True,
+            )
+            details = (
+                f"command: {windows_command!r}\n"
+                f"stdout:\n{windows_run.stdout}\n"
+                f"stderr:\n{windows_run.stderr}"
+            )
+            self.assertEqual(0, windows_run.returncode, details)
+            self.assertIn("additionalContext", windows_run.stdout, details)
 
 
 if __name__ == "__main__":
