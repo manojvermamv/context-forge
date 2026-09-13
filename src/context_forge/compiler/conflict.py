@@ -21,28 +21,22 @@ class ConflictResolver:
         """Identify when agent experiential memory contradicts an authoritative ADR or requirement (Intent vs Experience)."""
         conflicts = []
         for adr in authoritative:
-            body = (adr.get("body", "") + " " + adr.get("title", "")).lower()
             for exp in experience:
-                finding = (exp.get("finding", "") + " " + exp.get("lesson", "")).lower()
-                for neg in ("rejected", "do not use", "forbidden", "disabled", "superseded", "avoid"):
-                    if neg in body:
-                        words = [w for w in body.split() if len(w) > 4 and w != neg]
-                        for w in words:
-                            if w in finding and ("use" in finding or "recommended" in finding):
-                                conflicts.append({
-                                    "warning": (
-                                        f"Conflict detected: Agent memory suggested using '{w}', "
-                                        f"but authoritative {adr.get('id')} explicitly dictates: '{adr.get('title')}'. "
-                                        "Authoritative intent strictly wins."
-                                    ),
-                                    "winner": adr.get("id"),
-                                    "subordinate": exp.get("source", "memory"),
-                                    "disposition": ResolutionDisposition.ADVICE_REJECTED.value,
-                                    "domain_authoritative": AuthorityDomain.INTENT.value,
-                                    "domain_subordinate": AuthorityDomain.EXPERIENCE.value,
-                                    "reconciliation_required": False,
-                                })
-                                break
+                res = EpistemicAuthority.resolve_claims(adr, exp)
+                if res.claims_conflict and res.disposition == ResolutionDisposition.ADVICE_REJECTED:
+                    conflicts.append({
+                        "warning": (
+                            f"Conflict detected: Agent memory suggested advice that contradicts "
+                            f"authoritative {adr.get('id')} ('{adr.get('title', '')}'). "
+                            "Authoritative intent strictly wins."
+                        ),
+                        "winner": res.winner or adr.get("id"),
+                        "subordinate": exp.get("id") or exp.get("source", "memory"),
+                        "disposition": res.disposition.value,
+                        "domain_authoritative": res.domain_a.value if res.domain_a in (AuthorityDomain.INTENT, AuthorityDomain.POLICY) else res.domain_b.value,
+                        "domain_subordinate": AuthorityDomain.EXPERIENCE.value,
+                        "reconciliation_required": res.reconciliation_required,
+                    })
         return conflicts
 
     @staticmethod
@@ -53,50 +47,23 @@ class ConflictResolver:
         """Identify when actual code implementation violates or drifts from authoritative intent/policy."""
         drifts = []
         for adr in authoritative:
-            adr_id = adr.get("id", "ADR")
-            adr_title = adr.get("title", "")
-            adr_text = (adr.get("body", "") + " " + adr_title).lower()
-
             for fact in implementation:
-                details = (
-                    fact.get("details", "")
-                    + " " + fact.get("finding", "")
-                    + " " + fact.get("symbol", "")
-                    + " " + fact.get("summary", "")
-                ).lower()
-
-                is_drift = False
-                trigger_reason = ""
-
-                for mandate_word in ("must", "required", "mandatory", "enforce", "pass"):
-                    if mandate_word in adr_text:
-                        for token in re.findall(r"\b[A-Za-z0-9_]{4,30}\b", adr_text):
-                            if token in details and any(b in details for b in ("bypass", "skips", "missing", "violat", "omits", "without")):
-                                is_drift = True
-                                trigger_reason = f"Implementation bypasses or omits mandated '{token}'"
-                                break
-
-                for forbid_word in ("forbidden", "prohibited", "disallowed", "cannot"):
-                    if forbid_word in adr_text:
-                        for token in re.findall(r"\b[A-Za-z0-9_]{4,30}\b", adr_text):
-                            if token in details and any(u in details for u in ("calls", "uses", "contains", "present", "invokes")):
-                                is_drift = True
-                                trigger_reason = f"Implementation uses prohibited element '{token}'"
-                                break
-
-                if is_drift:
-                    disp = ResolutionDisposition.VIOLATION.value if "policy" in adr.get("kind", "").lower() else ResolutionDisposition.DRIFT.value
+                res = EpistemicAuthority.resolve_claims(adr, fact)
+                if res.claims_conflict and res.disposition in (ResolutionDisposition.DRIFT, ResolutionDisposition.VIOLATION):
+                    disp = res.disposition.value
+                    adr_id = adr.get("id", "ADR")
+                    adr_title = adr.get("title", "")
                     drifts.append({
                         "type": disp,
                         "disposition": disp,
                         "intent_id": adr_id,
                         "intent_title": adr_title,
-                        "intent_domain": AuthorityDomain.INTENT.value,
+                        "intent_domain": res.domain_a.value if res.domain_a in (AuthorityDomain.INTENT, AuthorityDomain.POLICY) else res.domain_b.value,
                         "implementation_domain": AuthorityDomain.IMPLEMENTATION.value,
-                        "reality": fact.get("details") or fact.get("finding") or details,
+                        "reality": fact.get("details") or fact.get("finding") or fact.get("summary", ""),
                         "warning": (
                             f"{disp}: {adr_id} mandates '{adr_title}', "
-                            f"but current code reality indicates: {trigger_reason} ({fact.get('symbol') or fact.get('path', 'unknown')}). "
+                            f"but current code reality indicates divergence: {res.reason} ({fact.get('symbol') or fact.get('path', 'unknown')}). "
                             "Implementation violates intent. Code does not alter policy, and intent does not hide code reality."
                         ),
                         "symbol": fact.get("symbol", ""),
@@ -113,26 +80,36 @@ class ConflictResolver:
         """Identify when fresh live code observations contradict older recorded technical facts."""
         stale_records = []
         for tech in technical_records:
-            tech_id = tech.get("id", "TECH")
-            tech_paths = set(tech.get("scope", []))
+            tech_claim = dict(tech)
+            if "kind" not in tech_claim:
+                tech_claim["kind"] = "technical"
+            if "authority" not in tech_claim:
+                tech_claim["authority"] = "code_observed"
+            tech_id = tech_claim.get("id", "TECH")
 
             for fact in fresh_code_facts:
-                fact_text = (fact.get("details", "") + " " + fact.get("finding", "")).lower()
-                fact_path = fact.get("path", "")
-                if fact_path and fact_path in tech_paths:
-                    if any(w in fact_text for w in ("removed", "renamed", "deprecated", "deleted")):
-                        stale_records.append({
-                            "type": "RECORD_STALE",
-                            "disposition": ResolutionDisposition.RECORD_STALE.value,
-                            "stale_id": tech_id,
-                            "winner": "current_code_evidence",
-                            "warning": (
-                                f"STALE TECHNICAL RECORD: {tech_id} is contradicted by current code evidence at '{fact_path}'. "
-                                "Fresh code observation supersedes recorded documentation."
-                            ),
-                            "live_evidence": fact_text,
-                            "reconciliation_required": True,
-                        })
+                fact_claim = dict(fact)
+                if "kind" not in fact_claim:
+                    fact_claim["kind"] = "technical"
+                if "authority" not in fact_claim:
+                    fact_claim["authority"] = "code_observed"
+                fact_claim["is_live"] = True
+
+                res = EpistemicAuthority.resolve_claims(tech_claim, fact_claim)
+                if res.claims_conflict and res.disposition == ResolutionDisposition.RECORD_STALE:
+                    fact_path = fact.get("path", "")
+                    stale_records.append({
+                        "type": "RECORD_STALE",
+                        "disposition": ResolutionDisposition.RECORD_STALE.value,
+                        "stale_id": tech_id,
+                        "winner": "current_code_evidence",
+                        "warning": (
+                            f"STALE TECHNICAL RECORD: {tech_id} is contradicted by current code evidence at '{fact_path}'. "
+                            "Fresh code observation supersedes recorded documentation."
+                        ),
+                        "live_evidence": fact.get("details") or fact.get("finding", ""),
+                        "reconciliation_required": True,
+                    })
         return stale_records
 
     @classmethod

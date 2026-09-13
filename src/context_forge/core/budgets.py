@@ -10,6 +10,11 @@ def _envint(name: str, default: int) -> int:
         return default
 
 
+class ContextBudgetError(ValueError):
+    """Raised when context pack content cannot fit within the requested budget even after deterministic compaction."""
+    pass
+
+
 class Budgets:
     """Character budgets enforced by Context Forge to guarantee progressive disclosure."""
     L0_CHARS: int = _envint("BRAIN_L0_BUDGET", 1600)             # current-state.md cold-start cap
@@ -32,5 +37,5 @@ class Budgets:
     @classmethod
     def char_budget_note(cls, label: str, n: int, budget: int) -> str:
         pct = int(100 * n / budget) if budget else 0
-        flag = " ⚠ OVER BUDGET" if n > budget else ""
+        flag = " [!] OVER BUDGET" if n > budget else ""
         return f"{label}: {n} chars / {budget} budget ({pct}%){flag}"

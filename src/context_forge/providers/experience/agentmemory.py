@@ -74,19 +74,31 @@ class AgentMemoryProvider(ExperienceProvider):
                     # Validate that response exhibits real compatible structure
                     has_status = "status" in body
                     raw_status = str(body.get("status", "")).lower()
-                    has_service = any(k in body for k in ("service", "name", "app")) and any(
-                        "agentmemory" in str(body[k]).lower() or "agent-memory" in str(body[k]).lower()
-                        for k in ("service", "name", "app") if k in body
-                    )
-                    has_version = bool(body.get("version"))
-                    has_capabilities = isinstance(body.get("capabilities"), list) and len(body.get("capabilities", [])) > 0
 
-                    if not (has_status or has_service or has_version or has_capabilities):
+                    service_val = str(body.get("service") or body.get("name") or body.get("app") or "").lower()
+                    has_service_match = "agentmemory" in service_val or "agent-memory" in service_val
+                    has_service_conflict = bool(service_val) and not has_service_match
+
+                    # If service name explicitly conflicts (e.g. {"service": "nginx"}):
+                    if has_service_conflict:
+                        return ProviderResult(
+                            status=ProviderStatus.INCOMPATIBLE,
+                            provider=self.name(),
+                            diagnostic_code="INCOMPATIBLE_SERVICE_IDENTITY",
+                            diagnostic=f"Service identity '{service_val}' does not match AgentMemory.",
+                            execution_time_ms=elapsed_ms,
+                        )
+
+                    caps = list(body.get("capabilities", [])) if isinstance(body.get("capabilities"), list) else []
+                    has_am_caps = any(c in ("smart-search", "search", "memories", "memory") for c in caps)
+
+                    # Strong identity check: must exhibit agentmemory service OR agentmemory-specific capability
+                    if not (has_service_match or has_am_caps):
                         return ProviderResult(
                             status=ProviderStatus.INCOMPATIBLE,
                             provider=self.name(),
                             diagnostic_code="INCOMPATIBLE_HEALTH_RESPONSE",
-                            diagnostic="AgentMemory /health returned arbitrary or unrecognized JSON structure (missing status, service identity, version, or capabilities).",
+                            diagnostic="Response lacks AgentMemory identity: missing service 'agentmemory' or AgentMemory capabilities.",
                             execution_time_ms=elapsed_ms,
                         )
 
@@ -99,8 +111,18 @@ class AgentMemoryProvider(ExperienceProvider):
                             execution_time_ms=elapsed_ms,
                         )
 
-                    version = str(body.get("version", "")) if has_version else ""
-                    caps = list(body.get("capabilities", [])) if isinstance(body.get("capabilities"), list) else []
+                    if has_status and raw_status in ("degraded", "warning", "partial"):
+                        return ProviderResult(
+                            status=ProviderStatus.DEGRADED,
+                            provider=self.name(),
+                            version=str(body.get("version", "")),
+                            capabilities=caps,
+                            diagnostic_code="HEALTH_DEGRADED",
+                            diagnostic=f"AgentMemory operational in degraded mode: {body.get('status')}",
+                            execution_time_ms=elapsed_ms,
+                        )
+
+                    version = str(body.get("version", "")) if bool(body.get("version")) else ""
 
                     return ProviderResult(
                         status=ProviderStatus.OK,
@@ -121,11 +143,49 @@ class AgentMemoryProvider(ExperienceProvider):
                     execution_time_ms=elapsed_ms,
                 )
             elif exc.code == 404:
+                # Check /agentmemory/livez as alternative liveness endpoint
+                try:
+                    req_lz = urllib.request.Request(
+                        f"{self.endpoint_url}/agentmemory/livez",
+                        headers=self._headers(),
+                    )
+                    with urllib.request.urlopen(req_lz, timeout=1.5) as resp_lz:
+                        if resp_lz.status == 200:
+                            return ProviderResult(
+                                status=ProviderStatus.OK,
+                                provider=self.name(),
+                                diagnostic="AgentMemory alive via /agentmemory/livez.",
+                                execution_time_ms=(time.monotonic() - t0) * 1000,
+                            )
+                except Exception:
+                    pass
                 return ProviderResult(
                     status=ProviderStatus.INCOMPATIBLE,
                     provider=self.name(),
                     diagnostic_code="HEALTH_ENDPOINT_NOT_FOUND",
                     diagnostic=f"Endpoint /agentmemory/health not found on {self.endpoint_url}. Verify server version.",
+                    execution_time_ms=elapsed_ms,
+                )
+            elif exc.code == 503:
+                try:
+                    err_body_raw = exc.read().decode("utf-8")
+                    err_json = json.loads(err_body_raw) if err_body_raw else {}
+                except Exception:
+                    err_json = {}
+                svc = str(err_json.get("service") or err_json.get("name") or "").lower()
+                if "agentmemory" in svc or "agent-memory" in svc or err_json.get("status") == "degraded":
+                    return ProviderResult(
+                        status=ProviderStatus.DEGRADED,
+                        provider=self.name(),
+                        diagnostic_code="HTTP_503_DEGRADED",
+                        diagnostic="AgentMemory returned HTTP 503 (temporarily degraded).",
+                        execution_time_ms=elapsed_ms,
+                    )
+                return ProviderResult(
+                    status=ProviderStatus.ERROR,
+                    provider=self.name(),
+                    diagnostic_code="HTTP_503",
+                    diagnostic=screen_secrets(f"AgentMemory HTTP 503: {exc.reason}"),
                     execution_time_ms=elapsed_ms,
                 )
             return ProviderResult(
@@ -169,7 +229,8 @@ class AgentMemoryProvider(ExperienceProvider):
         )
 
     def is_available(self) -> bool:
-        return self.check_health().is_ok()
+        health = self.check_health()
+        return health.status in (ProviderStatus.OK, ProviderStatus.DEGRADED, ProviderStatus.NO_RESULTS)
 
     def recall_lessons_result(self, query: str, limit: int = 5) -> ProviderResult:
         """Recall lessons using POST /agentmemory/smart-search with auth and fallback."""

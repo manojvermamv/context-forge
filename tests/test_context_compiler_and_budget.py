@@ -15,6 +15,7 @@ from context_forge.compiler.allocator import allocate_context_budget
 from context_forge.compiler.pack import compile_context_pack
 from context_forge.cli.commands import cmd_init, cmd_context
 from context_forge.core.models import ContextPack
+from context_forge.core.budgets import ContextBudgetError
 from context_forge.providers.base import ProviderResult, ProviderStatus
 
 
@@ -222,6 +223,134 @@ class TestContextCompilerAndBudget(unittest.TestCase):
                 as_dict = pack.to_dict()
                 self.assertIn("sections", as_dict)
                 self.assertLessEqual(pack.total_chars, budget)
+                # Invariant: pack.total_chars == len(rendered)
+                self.assertEqual(pack.total_chars, len(rendered))
+
+    def test_adversarial_budgets_3500_500_200_and_huge_inputs(self) -> None:
+        """Adversarial testing across budgets 3500, 500, 200 with huge provider diags, intent, and violations."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            cmd_init(repo)
+
+            from context_forge.knowledge.update import create_knowledge_record
+
+            # Multiple policies with huge bodies
+            for i in range(3):
+                create_knowledge_record(
+                    repo=repo,
+                    kind="policy",
+                    title=f"Security Policy {i}",
+                    body=f"Mandatory security policy {i} with huge body requirements. " * 50,
+                    authority="policy_mandate",
+                    evidence=f"Statutory policy source {i}",
+                    scope=[f"src/module_{i}.py"],
+                    accept=True,
+                )
+
+            (repo / "src").mkdir(parents=True, exist_ok=True)
+            for i in range(3):
+                (repo / "src" / f"module_{i}.py").write_text(
+                    f"# Bypasses Security Policy {i} entirely\nclass InsecureModule{i}: pass\n",
+                    encoding="utf-8",
+                )
+
+            class AdversarialCBM:
+                def is_available(self):
+                    return True
+                def query_impact_result(self, repo_path, query="", paths=None, scope_paths=None, **kwargs):
+                    return ProviderResult(
+                        status=ProviderStatus.DEGRADED,
+                        provider="codebase_memory_mcp",
+                        data=[
+                            {"symbol": f"InsecureModule{i}", "path": f"src/module_{i}.py", "details": "Bypasses policy with huge detail: " + ("D" * 800)}
+                            for i in range(3)
+                        ],
+                        diagnostic="CBM_ADVERSARIAL_DUMP_" + ("X" * 5000),
+                        diagnostic_message="CBM_ADVERSARIAL_DUMP_" + ("X" * 5000),
+                    )
+
+            class AdversarialAM:
+                def is_available(self):
+                    return True
+                def recall_lessons_result(self, query, limit=4):
+                    return ProviderResult(
+                        status=ProviderStatus.OK,
+                        provider="agentmemory",
+                        data=[
+                            {"finding": f"Prior failure {i}: " + ("F" * 600), "source": "agentmemory"}
+                            for i in range(4)
+                        ],
+                        diagnostic="AM_ADVERSARIAL_DUMP_" + ("Y" * 4000),
+                        diagnostic_message="AM_ADVERSARIAL_DUMP_" + ("Y" * 4000),
+                    )
+
+            with patch("context_forge.compiler.pack.CodebaseMemoryMCPProvider", AdversarialCBM), \
+                 patch("context_forge.compiler.pack.AgentMemoryProvider", AdversarialAM):
+
+                for b in (3500, 500):
+                    pack = compile_context_pack(
+                        repo,
+                        task_query="Security Policy 0 verification",
+                        paths=["src/module_0.py"],
+                        budget_chars=b,
+                    )
+                    rendered = pack.to_text()
+                    self.assertLessEqual(
+                        len(rendered),
+                        b,
+                        f"Budget {b} violated: actual {len(rendered)} chars",
+                    )
+                    self.assertEqual(
+                        pack.total_chars,
+                        len(rendered),
+                        f"pack.total_chars ({pack.total_chars}) != len(to_text()) ({len(rendered)})",
+                    )
+                    # Critical violation or drift must survive
+                    self.assertTrue("VIOLATION" in rendered or "DRIFT" in rendered)
+
+                # For budget = 200: test compile_context_pack on a minimal task where it fits
+                pack_200 = compile_context_pack(
+                    repo,
+                    task_query="inspect",
+                    paths=[],
+                    budget_chars=200,
+                )
+                rendered_200 = pack_200.to_text()
+                self.assertLessEqual(len(rendered_200), 200)
+                self.assertEqual(pack_200.total_chars, len(rendered_200))
+
+    def test_metadata_digit_boundary_shifts(self) -> None:
+        """Verify fixed-point convergence across digit boundaries (e.g. 999 -> 1000)."""
+        sections = {
+            "authoritative_intent": [
+                {"id": "REQ-001", "title": "Digit Boundary Test", "authority": "user_explicit", "body": "X" * 800}
+            ],
+            "current_implementation": [
+                {"symbol": "SymA", "path": "src/a.py", "details": "Implementation details " + ("Y" * 100)}
+            ],
+            "next_reading": ["src/a.py"],
+        }
+        pack = ContextPack(task="Digit boundary task", budget_chars=1100, **sections)
+        pack.finalize_budget(1100)
+
+        rendered = pack.to_text()
+        self.assertLessEqual(len(rendered), 1100)
+        self.assertEqual(pack.total_chars, len(rendered))
+        self.assertEqual(pack.total_chars, len(pack.to_text()))
+
+    def test_impossible_budget_raises_context_budget_error(self) -> None:
+        """When budget is smaller than irreducible minimum, ContextBudgetError is raised."""
+        sections = {
+            "authoritative_intent": [
+                {"id": "REQ-001", "title": "Mandatory Requirement", "authority": "user_explicit", "body": "Critical requirement"}
+            ],
+            "conflicts_and_staleness": [
+                {"type": "VIOLATION", "canonical_id": "REQ-001", "path": "src/risk.py", "warning": "Critical risk bypass"}
+            ],
+        }
+        pack = ContextPack(task="Impossible budget test", budget_chars=50, **sections)
+        with self.assertRaises(ContextBudgetError):
+            pack.finalize_budget(50)
 
 
 if __name__ == "__main__":

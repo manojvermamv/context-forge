@@ -6,7 +6,13 @@ from pathlib import Path
 from typing import Any, Iterator
 from context_forge.core.budgets import Budgets
 from context_forge.core.models import now_iso
-from context_forge.providers.base import CodeIntelligenceProvider
+from context_forge.providers.base import (
+    CodeIntelligenceProvider,
+    ProviderResult,
+    ProviderStatus,
+    VerificationKind,
+    verification_confidence,
+)
 
 IGNORE_DIRS = {
     ".git", ".brain", "node_modules", "__pycache__", ".venv", "venv",
@@ -198,7 +204,18 @@ class NativeCodeProvider(CodeIntelligenceProvider):
         symbol: Optional[str] = None,
         relationship: Optional[str] = None,
     ) -> ProviderResult:
-        """Verify presence of file or symbol in repository using native scanning."""
+        """Verify presence of file or symbol in repository using native scanning.
+        
+        Native provider does NOT perform structural relationship verification;
+        if relationship is requested, returns UNSUPPORTED.
+        """
+        if relationship:
+            return ProviderResult(
+                status=ProviderStatus.UNSUPPORTED,
+                provider=self.name(),
+                diagnostic=f"Native provider does not support verifying relationship '{relationship}'.",
+            )
+
         target = Path(repo_path) / path
         if not target.exists():
             return ProviderResult(
@@ -219,14 +236,30 @@ class NativeCodeProvider(CodeIntelligenceProvider):
                             return ProviderResult(
                                 status=ProviderStatus.OK,
                                 provider=self.name(),
-                                data={"path": path, "symbol": symbol},
+                                data={
+                                    "path": path,
+                                    "symbol": symbol,
+                                    "relationship": None,
+                                    "verification_kind": VerificationKind.TEXT_SEARCH.value,
+                                    "structurally_verified": False,
+                                    "confidence": verification_confidence(VerificationKind.TEXT_SEARCH),
+                                    "evidence_source": "native_regex_symbol_match",
+                                },
                                 diagnostic=f"Native verification: symbol '{symbol}' found in '{path}'.",
                             )
                 if symbol in content:
                     return ProviderResult(
                         status=ProviderStatus.OK,
                         provider=self.name(),
-                        data={"path": path, "symbol": symbol},
+                        data={
+                            "path": path,
+                            "symbol": symbol,
+                            "relationship": None,
+                            "verification_kind": VerificationKind.TEXT_SEARCH.value,
+                            "structurally_verified": False,
+                            "confidence": verification_confidence(VerificationKind.TEXT_SEARCH),
+                            "evidence_source": "native_text_search",
+                        },
                         diagnostic=f"Native verification: symbol '{symbol}' matched in '{path}'.",
                     )
             except OSError:
@@ -241,7 +274,15 @@ class NativeCodeProvider(CodeIntelligenceProvider):
         return ProviderResult(
             status=ProviderStatus.OK,
             provider=self.name(),
-            data={"path": path},
-            diagnostic=f"Native verification: file '{path}' exists.",
+            data={
+                "path": path,
+                "symbol": None,
+                "relationship": None,
+                "verification_kind": VerificationKind.FILESYSTEM.value,
+                "structurally_verified": False,
+                "confidence": verification_confidence(VerificationKind.FILESYSTEM),
+                "evidence_source": "native_filesystem_stat",
+            },
+            diagnostic=f"Native verification: file '{path}' exists on disk.",
         )
 

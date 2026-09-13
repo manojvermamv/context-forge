@@ -11,6 +11,17 @@ import argparse
 import sys
 from pathlib import Path
 
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+if hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 # Ensure src/ package is in Python module search path
 _SRC_DIR = Path(__file__).resolve().parent.parent / "src"
 if _SRC_DIR.exists() and str(_SRC_DIR) not in sys.path:

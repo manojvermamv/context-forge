@@ -4,14 +4,35 @@ from pathlib import Path
 from typing import Any
 from context_forge.core.models import ContextPack, now_iso
 from context_forge.core.budgets import Budgets
+from context_forge.core.evidence import screen_secrets
 from context_forge.store.paths import brain_paths, read_text
 from context_forge.store.markdown import extract_frontmatter_dict, first_heading
 from context_forge.compiler.router import search_knowledge_index
 from context_forge.compiler.conflict import ConflictResolver
-from context_forge.compiler.allocator import allocate_context_budget
+from context_forge.compiler.allocator import allocate_context_budget, finalize_context_pack
 from context_forge.providers.base import ProviderStatus, ProviderResult
 from context_forge.providers.code import NativeCodeProvider, CodebaseMemoryMCPProvider
 from context_forge.providers.experience import NativeExperienceProvider, AgentMemoryProvider
+
+
+def _sanitize_payload(data: Any) -> Any:
+    """Recursively scrub secrets from external provider data structures."""
+    if isinstance(data, str):
+        return screen_secrets(data)
+    elif isinstance(data, dict):
+        res = {}
+        has_redactions = False
+        for k, v in data.items():
+            cleaned_v = _sanitize_payload(v)
+            res[k] = cleaned_v
+            if isinstance(v, str) and (screen_secrets(v) != v or "[REDACTED]" in cleaned_v):
+                has_redactions = True
+        if has_redactions:
+            res["contains_redactions"] = True
+        return res
+    elif isinstance(data, list):
+        return [_sanitize_payload(item) for item in data]
+    return data
 
 
 def compile_context_pack(
@@ -39,9 +60,7 @@ def compile_context_pack(
                     if rel_p in hit_paths:
                         continue
                     rtext = read_text(rpath)
-                    rfm, _ = extract_frontmatter_dict(rtext)
-                    rscope = rfm.get("scope", [])
-                    if any(sp in rscope for sp in scope_paths):
+                    if any(sp in rtext for sp in scope_paths):
                         hits.append({"path": rel_p, "title": first_heading(rtext) or rpath.stem, "snippet": ""})
                         hit_paths.add(rel_p)
 
@@ -79,12 +98,27 @@ def compile_context_pack(
             })
             matched_record_paths.append(h["path"])
         elif kind in ("technical", "TECH"):
+            tech_scope = fm.get("scope") or []
+            if isinstance(tech_scope, str):
+                tech_scope = [tech_scope]
+            tech_symbols = fm.get("affected_symbols") or []
+            if isinstance(tech_symbols, str):
+                tech_symbols = [tech_symbols]
+
             recorded_tech.append({
                 "id": rec_id,
                 "kind": kind,
                 "title": title,
                 "details": body[:300].strip(),
-                "path": h["path"],
+                "record_path": h["path"],
+                "path": tech_scope[0] if tech_scope else h["path"],
+                "scope": tech_scope,
+                "affected_paths": tech_scope,
+                "symbols": tech_symbols,
+                "affected_symbols": tech_symbols,
+                "observed_commit": fm.get("evidence_observed_commit") or fm.get("observed_commit") or "",
+                "freshness": fm.get("freshness", "fresh"),
+                "verification_state": fm.get("evidence_verification_state") or fm.get("verification_state", "unverified"),
             })
             matched_record_paths.append(h["path"])
             if fm.get("freshness") in ("possibly_stale", "stale", "contradicted", "branch_diverged"):
@@ -98,20 +132,20 @@ def compile_context_pack(
     provider_diagnostics: list[dict[str, Any]] = []
     cbm = CodebaseMemoryMCPProvider()
     cbm_res = cbm.query_impact_result(repo, task_query, scope_paths)
-    provider_diagnostics.append(cbm_res.to_dict())
+    provider_diagnostics.append(_sanitize_payload(cbm_res.to_dict()))
 
     code_reality: list[dict[str, Any]] = []
     if (cbm_res.is_ok() or cbm_res.status == ProviderStatus.DEGRADED) and cbm_res.data:
-        code_reality = list(cbm_res.data)
+        code_reality = _sanitize_payload(list(cbm_res.data))
     else:
         # Graceful functional degradation to native code mapper
         native_code = NativeCodeProvider()
         native_res = native_code.query_impact_result(repo, task_query, scope_paths)
-        code_reality = list(native_res.data or [])
+        code_reality = _sanitize_payload(list(native_res.data or []))
         native_dict = native_res.to_dict()
         native_dict["fallback_used"] = True
         native_dict["diagnostic_message"] = "CBM unavailable; degraded to native code mapper."
-        provider_diagnostics.append(native_dict)
+        provider_diagnostics.append(_sanitize_payload(native_dict))
 
     # Incorporate recorded technical knowledge into code reality
     code_reality.extend(recorded_tech)
@@ -119,21 +153,21 @@ def compile_context_pack(
     # 3. Experience provider (AgentMemory if available, otherwise Native)
     am = AgentMemoryProvider()
     am_res = am.recall_lessons_result(task_query, limit=4)
-    provider_diagnostics.append(am_res.to_dict())
+    provider_diagnostics.append(_sanitize_payload(am_res.to_dict()))
 
     past_experience: list[dict[str, Any]] = []
     if (am_res.is_ok() or am_res.status == ProviderStatus.DEGRADED) and am_res.data:
-        past_experience = list(am_res.data)
+        past_experience = _sanitize_payload(list(am_res.data))
     elif am_res.status == ProviderStatus.UNAUTHORIZED:
         past_experience = []
     else:
         native_exp = NativeExperienceProvider(repo)
         native_exp_res = native_exp.recall_lessons_result(task_query, limit=4)
-        past_experience = list(native_exp_res.data or [])
+        past_experience = _sanitize_payload(list(native_exp_res.data or []))
         native_exp_dict = native_exp_res.to_dict()
         native_exp_dict["fallback_used"] = True
         native_exp_dict["diagnostic_message"] = "AgentMemory unavailable; degraded to native session log."
-        provider_diagnostics.append(native_exp_dict)
+        provider_diagnostics.append(_sanitize_payload(native_exp_dict))
 
     # 4. Cross-Plane Conflict & Staleness Reconciler
     all_alerts: list[dict[str, Any]] = []
@@ -188,8 +222,5 @@ def compile_context_pack(
         provider_diagnostics=trimmed.get("provider_diagnostics", provider_diagnostics),
     )
 
-    rendered = pack.to_text()
-    pack.total_chars = len(rendered)
-    pack.estimated_tokens = Budgets.rough_tokens(pack.total_chars)
-
+    pack = finalize_context_pack(pack, max_budget=budget_chars)
     return pack

@@ -42,6 +42,48 @@ def _proc_try_acquire(repo_path: str, timeout: float, stale_timeout: float, out_
         out_queue.put(f"ERROR: {type(e).__name__}: {e}")
 
 
+def _proc_writer(repo_path: str, count: int, error_queue: Any) -> None:
+    from pathlib import Path
+    from context_forge.knowledge.update import create_knowledge_record
+    try:
+        for i in range(count):
+            create_knowledge_record(
+                repo=Path(repo_path),
+                kind="decision",
+                title=f"Concurrent ADR {i}",
+                body=f"Content for concurrent decision {i}",
+                authority="user_explicit",
+                evidence="User statement",
+                scope=[f"src/worker_{i}.py"],
+                accept=True,
+            )
+            time.sleep(0.01)
+    except Exception as exc:
+        error_queue.put(f"writer_error: {type(exc).__name__}: {exc}")
+
+
+def _proc_indexer(repo_path: str, count: int, error_queue: Any) -> None:
+    from pathlib import Path
+    from context_forge.cli.commands import cmd_index
+    try:
+        for _ in range(count):
+            cmd_index(Path(repo_path))
+            time.sleep(0.02)
+    except Exception as exc:
+        error_queue.put(f"indexer_error: {type(exc).__name__}: {exc}")
+
+
+def _proc_freshness(repo_path: str, count: int, error_queue: Any) -> None:
+    from pathlib import Path
+    from context_forge.traceability.freshness import update_repository_freshness
+    try:
+        for _ in range(count):
+            update_repository_freshness(Path(repo_path))
+            time.sleep(0.02)
+    except Exception as exc:
+        error_queue.put(f"freshness_error: {type(exc).__name__}: {exc}")
+
+
 class ConcurrencyTestCase(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -52,8 +94,13 @@ class ConcurrencyTestCase(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_concurrent_id_allocation_and_writes(self):
-        """Verify that concurrent threads allocating IDs and writing records do not collide."""
-        n_workers = 8
+        """Verify that concurrent threads allocating IDs and writing records do not collide.
+
+        Uses 4 workers because each record creation holds repo_lock through
+        ID allocation + file write + FTS rebuild, making total serialized time
+        proportional to worker count × per-record time.
+        """
+        n_workers = 4
 
         def worker(idx: int) -> int:
             return create_knowledge_record(

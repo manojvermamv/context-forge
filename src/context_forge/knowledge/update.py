@@ -148,9 +148,34 @@ def create_knowledge_record(
 
         sync_routing_index(p)
         write_registry(repo, p)
+
+        # Lightweight incremental FTS rebuild — avoids re-entering repo_lock
+        # and running full freshness scans (cmd_index) during each record write.
+        # Full cmd_index should be called externally after batch operations.
         if p["search_index_db"].exists() or p["search_index_json"].exists():
-            from context_forge.cli.commands import cmd_index
-            cmd_index(repo)
+            from context_forge.store.sqlite_index import fts5_available, build_fts5_index
+            from context_forge.store.json_index import build_json_index
+            from context_forge.store.markdown import first_heading
+            from context_forge.core.budgets import Budgets
+            from context_forge.store.paths import STATE_DIR
+
+            docs = []
+            for md in p["root"].rglob("*.md"):
+                if STATE_DIR in md.parts or (p["audit"].exists() and p["audit"] in md.parents):
+                    continue
+                try:
+                    size = md.stat().st_size
+                except OSError:
+                    continue
+                text = read_text(md)
+                if size > Budgets.MAX_INDEX_FILE_BYTES:
+                    text = text[:Budgets.MAX_INDEX_FILE_BYTES]
+                docs.append({"path": str(md.relative_to(repo)), "text": text, "title": first_heading(text) or md.stem})
+
+            if fts5_available():
+                build_fts5_index(p["search_index_db"], docs)
+            else:
+                build_json_index(p["search_index_json"], docs)
 
         print(f"[brain] recorded {record_id} at {path.relative_to(repo)}")
         return 0

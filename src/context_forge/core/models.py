@@ -432,13 +432,13 @@ class ContextPack:
     provider_diagnostics: list[Any] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
-        """Produce canonical JSON matching context-pack.schema.json while keeping backward compatibility."""
-        diag_summaries = []
+        """Produce canonical JSON matching context-pack.schema.json while preserving structured diagnostics."""
+        diag_items = []
         for d in self.provider_diagnostics:
             if isinstance(d, dict):
-                diag_summaries.append(d.get("diagnostic_message") or d.get("diagnostic") or str(d))
+                diag_items.append(dict(d))
             else:
-                diag_summaries.append(str(d))
+                diag_items.append(str(d))
 
         return {
             "task": self.task,
@@ -453,7 +453,7 @@ class ContextPack:
                 "open_questions": self.open_questions,
                 "conflicts_and_staleness": self.conflicts_and_staleness,
                 "next_reading": self.next_reading,
-                "provider_diagnostics": diag_summaries,
+                "provider_diagnostics": diag_items,
             },
             # Top-level mirrors for legacy callers
             "authoritative_intent": self.authoritative_intent,
@@ -462,7 +462,7 @@ class ContextPack:
             "open_questions": self.open_questions,
             "conflicts_and_staleness": self.conflicts_and_staleness,
             "next_reading": self.next_reading,
-            "provider_diagnostics": diag_summaries,
+            "provider_diagnostics": diag_items,
         }
 
     @classmethod
@@ -544,4 +544,9 @@ class ContextPack:
 
     def render_markdown(self) -> str:
         return self.to_text()
+
+    def finalize_budget(self, max_budget: Optional[int] = None) -> "ContextPack":
+        """Deterministically finalize budget postcondition and fixed-point character metadata."""
+        from context_forge.compiler.allocator import finalize_context_pack
+        return finalize_context_pack(self, max_budget=max_budget)
 

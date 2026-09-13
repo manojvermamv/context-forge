@@ -11,6 +11,7 @@ from context_forge.core.identity import get_git_info
 from context_forge.core.budgets import Budgets
 from context_forge.core.evidence import screen_secrets
 from context_forge.store.paths import brain_paths, atomic_write, read_text, read_json, STATE_DIR, BRAIN_SCHEMA_VERSION
+from context_forge.store.lock import repo_lock
 from context_forge.store.markdown import first_heading
 from context_forge.store.registry import sync_routing_index, write_registry
 from context_forge.store.sqlite_index import fts5_available, build_fts5_index
@@ -32,185 +33,189 @@ TEMPLATES_DIR = Path(__file__).resolve().parents[3] / "templates"
 
 def cmd_init(repo: Path, force: bool = False) -> None:
     p = brain_paths(repo)
-    if p["root"].exists() and not force:
-        print(f"[brain] {p['root']} already exists (use --force only to replace template-managed root files)")
-    p["root"].mkdir(parents=True, exist_ok=True)
-    for key in ("decisions", "concepts", "requirements", "technical", "policies", "traceability", "questions", "audit"):
-        p[key].mkdir(exist_ok=True)
-    p["state"].mkdir(exist_ok=True)
+    with repo_lock(p):
+        if p["root"].exists() and not force:
+            print(f"[brain] {p['root']} already exists (use --force only to replace template-managed root files)")
+        p["root"].mkdir(parents=True, exist_ok=True)
+        for key in ("decisions", "concepts", "requirements", "technical", "policies", "traceability", "questions", "audit"):
+            p[key].mkdir(exist_ok=True)
+        p["state"].mkdir(exist_ok=True)
 
-    defaults = {
-        "current-state.md": (TEMPLATES_DIR / "current-state.md"),
-        "index.md": (TEMPLATES_DIR / "index.md"),
-        "overview.md": (TEMPLATES_DIR / "overview.md"),
-        "status.md": (TEMPLATES_DIR / "status.md"),
-        "log.md": (TEMPLATES_DIR / "log.md"),
-    }
-    for name, tpl in defaults.items():
-        dest = p["root"] / name
-        if dest.exists() and not force:
-            continue
-        content = read_text(tpl, f"# {name}\n\n_(template missing)_\n")
-        content = content.replace("{{DATE}}", today()).replace("{{REPO}}", repo.name)
-        atomic_write(dest, content)
+        defaults = {
+            "current-state.md": (TEMPLATES_DIR / "current-state.md"),
+            "index.md": (TEMPLATES_DIR / "index.md"),
+            "overview.md": (TEMPLATES_DIR / "overview.md"),
+            "status.md": (TEMPLATES_DIR / "status.md"),
+            "log.md": (TEMPLATES_DIR / "log.md"),
+        }
+        for name, tpl in defaults.items():
+            dest = p["root"] / name
+            if dest.exists() and not force:
+                continue
+            content = read_text(tpl, f"# {name}\n\n_(template missing)_\n")
+            content = content.replace("{{DATE}}", today()).replace("{{REPO}}", repo.name)
+            atomic_write(dest, content)
 
-    if not p["config"].exists():
-        atomic_write(p["config"], json.dumps({
-            "schema_version": BRAIN_SCHEMA_VERSION,
-            "created": now_iso(),
-            "repo_name": repo.name,
-            "budgets": {
-                "l0_chars": Budgets.L0_CHARS,
-                "map_chars": Budgets.MAP_CHARS,
-                "topic_chars": Budgets.TOPIC_CHARS,
-            },
-            "decision_capture": "review",
-        }, indent=2) + "\n")
+        if not p["config"].exists():
+            atomic_write(p["config"], json.dumps({
+                "schema_version": BRAIN_SCHEMA_VERSION,
+                "created": now_iso(),
+                "repo_name": repo.name,
+                "budgets": {
+                    "l0_chars": Budgets.L0_CHARS,
+                    "map_chars": Budgets.MAP_CHARS,
+                    "topic_chars": Budgets.TOPIC_CHARS,
+                },
+                "decision_capture": "review",
+            }, indent=2) + "\n")
 
-    gi = p["root"] / ".gitignore"
-    if not gi.exists():
-        atomic_write(gi, f"{STATE_DIR}/\n*.tmp*\n")
+        gi = p["root"] / ".gitignore"
+        if not gi.exists():
+            atomic_write(gi, f"{STATE_DIR}/\n*.tmp*\n")
 
-    cmd_map(repo)
-    cmd_index(repo)
-    print(f"[brain] initialized {p['root']} — run the doctor: python3 brain.py doctor {repo}")
+        cmd_map(repo)
+        cmd_index(repo)
+        print(f"[brain] initialized {p['root']} — run the doctor: python3 brain.py doctor {repo}")
 
 
 def cmd_map(repo: Path) -> None:
     p = brain_paths(repo)
-    content = build_code_map(repo)
-    atomic_write(p["map"], content)
-    status_label = "OK" if len(content) <= Budgets.MAP_CHARS * 1.1 else "over budget, see note in file"
-    print(f"[brain] map.md regenerated: {len(content)} chars ({status_label})")
+    with repo_lock(p):
+        content = build_code_map(repo)
+        atomic_write(p["map"], content)
+        status_label = "OK" if len(content) <= Budgets.MAP_CHARS * 1.1 else "over budget, see note in file"
+        print(f"[brain] map.md regenerated: {len(content)} chars ({status_label})")
 
 
 def cmd_index(repo: Path) -> None:
     p = brain_paths(repo)
-    sync_routing_index(p)
-    write_registry(repo, p)
-    update_repository_freshness(repo)
+    with repo_lock(p):
+        sync_routing_index(p)
+        write_registry(repo, p)
+        update_repository_freshness(repo)
 
-    docs = []
-    for md in p["root"].rglob("*.md"):
-        if STATE_DIR in md.parts or (p["audit"].exists() and p["audit"] in md.parents):
-            continue
-        try:
-            size = md.stat().st_size
-        except OSError:
-            continue
-        text = read_text(md)
-        if size > Budgets.MAX_INDEX_FILE_BYTES:
-            text = text[:Budgets.MAX_INDEX_FILE_BYTES]
-        docs.append({"path": str(md.relative_to(repo)), "text": text, "title": first_heading(text) or md.stem})
+        docs = []
+        for md in p["root"].rglob("*.md"):
+            if STATE_DIR in md.parts or (p["audit"].exists() and p["audit"] in md.parents):
+                continue
+            try:
+                size = md.stat().st_size
+            except OSError:
+                continue
+            text = read_text(md)
+            if size > Budgets.MAX_INDEX_FILE_BYTES:
+                text = text[:Budgets.MAX_INDEX_FILE_BYTES]
+            docs.append({"path": str(md.relative_to(repo)), "text": text, "title": first_heading(text) or md.stem})
 
-    if fts5_available():
-        build_fts5_index(p["search_index_db"], docs)
-        engine = "sqlite-fts5"
-    else:
-        build_json_index(p["search_index_json"], docs)
-        engine = "json-inverted-index"
+        if fts5_available():
+            build_fts5_index(p["search_index_db"], docs)
+            engine = "sqlite-fts5"
+        else:
+            build_json_index(p["search_index_json"], docs)
+            engine = "json-inverted-index"
 
-    print(f"[brain] indexed {len(docs)} pages via {engine}")
+        print(f"[brain] indexed {len(docs)} pages via {engine}")
 
 
 def cmd_scan(repo: Path) -> int:
     p = brain_paths(repo)
-    if not p["root"].exists():
-        cmd_init(repo)
-    cmd_map(repo)
+    with repo_lock(p):
+        if not p["root"].exists():
+            cmd_init(repo)
+        cmd_map(repo)
 
-    commit_sha, branch, worktree = ("", "", "")
-    if (repo / ".git").exists():
-        commit_sha, branch, worktree = get_git_info(repo)
+        commit_sha, branch, worktree = ("", "", "")
+        if (repo / ".git").exists():
+            commit_sha, branch, worktree = get_git_info(repo)
 
-    map_record = p["technical"] / "codebase-map.md"
-    if not map_record.exists():
-        fm = [
-            "---",
-            "id: TECH-CODEBASE-MAP",
-            "kind: technical",
-            "status: observed",
-            "authority: code_observed",
-            f"updated: {today()}",
-            f"created_at: {now_iso()}",
-            "schema_version: 2.0",
-            f"project_id: {repo.name}",
-            f"repository: {repo.name}",
-        ]
-        if commit_sha:
-            fm.append(f"commit_sha: {commit_sha}")
-            fm.append(f"evidence_observed_commit: {commit_sha}")
-        if branch:
-            fm.append(f"branch: {branch}")
-        fm.extend([
-            "producer: scanner",
-            "producer_type: tool",
-            "authority_domain: IMPLEMENTATION",
-            "authority_level: 70",
-            "---",
-            "",
-            "# Codebase Map",
-            "",
-            "The generated [code map](../map.md) is the authoritative structural view. "
-            "This record exists so any agent can route to it without treating source "
-            "structure as product intent.",
-            "",
-            "## Evidence",
-            "",
-            "- Deterministic local scan of the repository.",
-            "",
-        ])
-        atomic_write(map_record, "\n".join(fm))
+        map_record = p["technical"] / "codebase-map.md"
+        if not map_record.exists():
+            fm = [
+                "---",
+                "id: TECH-CODEBASE-MAP",
+                "kind: technical",
+                "status: observed",
+                "authority: code_observed",
+                f"updated: {today()}",
+                f"created_at: {now_iso()}",
+                "schema_version: 2.0",
+                f"project_id: {repo.name}",
+                f"repository: {repo.name}",
+            ]
+            if commit_sha:
+                fm.append(f"commit_sha: {commit_sha}")
+                fm.append(f"evidence_observed_commit: {commit_sha}")
+            if branch:
+                fm.append(f"branch: {branch}")
+            fm.extend([
+                "producer: scanner",
+                "producer_type: tool",
+                "authority_domain: IMPLEMENTATION",
+                "authority_level: 70",
+                "---",
+                "",
+                "# Codebase Map",
+                "",
+                "The generated [code map](../map.md) is the authoritative structural view. "
+                "This record exists so any agent can route to it without treating source "
+                "structure as product intent.",
+                "",
+                "## Evidence",
+                "",
+                "- Deterministic local scan of the repository.",
+                "",
+            ])
+            atomic_write(map_record, "\n".join(fm))
 
-    test_files = []
-    from context_forge.providers.code.native import IGNORE_DIRS
-    for candidate in repo.rglob("test_*.py"):
-        if not any(part in IGNORE_DIRS for part in candidate.parts):
-            test_files.append(candidate.relative_to(repo).as_posix())
+        test_files = []
+        from context_forge.providers.code.native import IGNORE_DIRS
+        for candidate in repo.rglob("test_*.py"):
+            if not any(part in IGNORE_DIRS for part in candidate.parts):
+                test_files.append(candidate.relative_to(repo).as_posix())
 
-    testing = p["technical"] / "testing.md"
-    if not testing.exists():
-        bullets = "\n".join(f"- `{item}`" for item in sorted(test_files)[:40]) or "- No conventional test files were detected."
-        fm_t = [
-            "---",
-            "id: TECH-TESTING",
-            "kind: technical",
-            "status: observed",
-            "authority: code_observed",
-            f"updated: {today()}",
-            f"created_at: {now_iso()}",
-            "schema_version: 2.0",
-            f"project_id: {repo.name}",
-            f"repository: {repo.name}",
-        ]
-        if commit_sha:
-            fm_t.append(f"commit_sha: {commit_sha}")
-            fm_t.append(f"evidence_observed_commit: {commit_sha}")
-        if branch:
-            fm_t.append(f"branch: {branch}")
-        fm_t.extend([
-            "producer: scanner",
-            "producer_type: tool",
-            "authority_domain: IMPLEMENTATION",
-            "authority_level: 70",
-            "---",
-            "",
-            "# Testing",
-            "",
-            "This is a code-observed starting point, not a statement of required quality.",
-            "",
-            "## Detected test files",
-            "",
-            bullets,
-            "",
-        ])
-        atomic_write(testing, "\n".join(fm_t))
+        testing = p["technical"] / "testing.md"
+        if not testing.exists():
+            bullets = "\n".join(f"- `{item}`" for item in sorted(test_files)[:40]) or "- No conventional test files were detected."
+            fm_t = [
+                "---",
+                "id: TECH-TESTING",
+                "kind: technical",
+                "status: observed",
+                "authority: code_observed",
+                f"updated: {today()}",
+                f"created_at: {now_iso()}",
+                "schema_version: 2.0",
+                f"project_id: {repo.name}",
+                f"repository: {repo.name}",
+            ]
+            if commit_sha:
+                fm_t.append(f"commit_sha: {commit_sha}")
+                fm_t.append(f"evidence_observed_commit: {commit_sha}")
+            if branch:
+                fm_t.append(f"branch: {branch}")
+            fm_t.extend([
+                "producer: scanner",
+                "producer_type: tool",
+                "authority_domain: IMPLEMENTATION",
+                "authority_level: 70",
+                "---",
+                "",
+                "# Testing",
+                "",
+                "This is a code-observed starting point, not a statement of required quality.",
+                "",
+                "## Detected test files",
+                "",
+                bullets,
+                "",
+            ])
+            atomic_write(testing, "\n".join(fm_t))
 
-    audit_ident = IdentityEnvelope(commit_sha=commit_sha, branch=branch, producer="scanner")
-    append_audit_log(p, "scan", map_record, "Created a deterministic technical baseline; no requirements or decisions were inferred.", identity=audit_ident)
-    cmd_index(repo)
-    print(f"[brain] scan complete — technical baseline is available under {p['technical'].relative_to(repo)}")
-    return 0
+        audit_ident = IdentityEnvelope(commit_sha=commit_sha, branch=branch, producer="scanner")
+        append_audit_log(p, "scan", map_record, "Created a deterministic technical baseline; no requirements or decisions were inferred.", identity=audit_ident)
+        cmd_index(repo)
+        print(f"[brain] scan complete — technical baseline is available under {p['technical'].relative_to(repo)}")
+        return 0
 
 
 def cmd_context(

@@ -18,7 +18,22 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Generator, Union
 
-_process_rlock = threading.RLock()
+_lock_registry: dict[str, threading.RLock] = {}
+_registry_lock = threading.Lock()
+
+
+def _get_process_rlock(lock_path: Path) -> threading.RLock:
+    """Return in-process RLock specific to the target repository lock path."""
+    try:
+        key = str(lock_path.resolve()).replace("\\", "/").lower()
+    except (OSError, RuntimeError):
+        key = str(lock_path).replace("\\", "/").lower()
+    with _registry_lock:
+        if key not in _lock_registry:
+            _lock_registry[key] = threading.RLock()
+        return _lock_registry[key]
+
+
 _tls = threading.local()
 
 
@@ -97,8 +112,9 @@ def repo_lock(
     lock_path = get_lock_path(target)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Acquire process-level RLock first
-    acquired_thread_lock = _process_rlock.acquire(timeout=timeout)
+    # Acquire per-repository process-level RLock first
+    proc_lock = _get_process_rlock(lock_path)
+    acquired_thread_lock = proc_lock.acquire(timeout=timeout)
     if not acquired_thread_lock:
         raise LockTimeoutError(f"Thread lock acquisition timed out for {lock_path}")
 
@@ -204,4 +220,4 @@ def repo_lock(
                 pass
 
     finally:
-        _process_rlock.release()
+        proc_lock.release()

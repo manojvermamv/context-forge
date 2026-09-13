@@ -224,37 +224,53 @@ class EpistemicAuthority:
             intent_text = (intent_item.get("body", "") + " " + intent_item.get("title", "")).lower()
             exp_text = (exp_item.get("finding", "") + " " + exp_item.get("lesson", "") + " " + exp_item.get("title", "")).lower()
 
+            # Check normalized structured propositions first
+            subj_i = intent_item.get("subject") or intent_item.get("claim_key")
+            subj_e = exp_item.get("subject") or exp_item.get("claim_key")
+            if subj_i and subj_e and str(subj_i).lower() == str(subj_e).lower():
+                pol_i = intent_item.get("polarity", True)
+                pol_e = exp_item.get("polarity", True)
+                obj_i = str(intent_item.get("object", "")).lower()
+                obj_e = str(exp_item.get("object", "")).lower()
+                pred_i = str(intent_item.get("predicate", "")).lower()
+                pred_e = str(exp_item.get("predicate", "")).lower()
+
+                if pol_i != pol_e or (obj_i and obj_e and obj_i != obj_e):
+                    return AuthorityResolution(
+                        disposition=ResolutionDisposition.ADVICE_REJECTED,
+                        domain_a=domain_a,
+                        domain_b=domain_b,
+                        claims_conflict=True,
+                        winner=intent_item.get("id"),
+                        preserved_claims=[intent_item],
+                        reason=f"Authoritative {intent_item.get('id')} dictates intent for '{subj_i}'; contradictory experiential advice rejected.",
+                        evidence=f"Intent: {pred_i} {obj_i} (polarity={pol_i}); Experience: {pred_e} {obj_e} (polarity={pol_e})",
+                        reconciliation_required=False,
+                    )
+                else:
+                    return AuthorityResolution(
+                        disposition=ResolutionDisposition.AGREES,
+                        domain_a=domain_a,
+                        domain_b=domain_b,
+                        claims_conflict=False,
+                        preserved_claims=[claim_a, claim_b],
+                        reason="Experiential finding agrees with authoritative structured proposition.",
+                    )
+
             # Phase 1: Relevance check
             intent_words = set(re.findall(r"\b[a-zA-Z0-9_-]{4,30}\b", intent_text))
             exp_words = set(re.findall(r"\b[a-zA-Z0-9_-]{4,30}\b", exp_text))
             stop_words = {"with", "that", "this", "from", "have", "will", "your", "must", "should", "could", "would"}
             shared_topics = (intent_words & exp_words) - stop_words
 
-            # Phase 2: Contradiction check
+            # Phase 2: Contradiction check via semantic polarity
             advice_contradicts = False
-            for neg in ("rejected", "do not use", "forbidden", "disabled", "superseded", "avoid", "must not", "prohibited"):
+            for neg in ("rejected", "do not use", "forbidden", "disabled", "superseded", "avoid", "must not", "prohibited", "disallow"):
                 if neg in intent_text:
                     for w in shared_topics:
                         if w in exp_text and any(k in exp_text for k in ("use", "try", "recommended", "adopt", "suggest")):
                             advice_contradicts = True
                             break
-
-            if not advice_contradicts:
-                for mandate in ("use ", "require", "mandatory", "standard is", "adopted"):
-                    if mandate in intent_text and any(k in exp_text for k in ("try ", "suggest", "use ", "recommend")):
-                        competing_pairs = [
-                            ({"rabbitmq", "rabbit"}, {"kafka"}),
-                            ({"postgresql", "postgres"}, {"mongo", "mongodb", "mysql", "sqlite"}),
-                            ({"redis"}, {"memcached"}),
-                            ({"threads", "threading"}, {"asyncio", "async"}),
-                        ]
-                        for group_a, group_b in competing_pairs:
-                            if any(ga in intent_text for ga in group_a) and any(gb in exp_text for gb in group_b):
-                                advice_contradicts = True
-                                break
-                            if any(gb in intent_text for gb in group_b) and any(ga in exp_text for ga in group_a):
-                                advice_contradicts = True
-                                break
 
             if advice_contradicts:
                 return AuthorityResolution(
@@ -269,7 +285,7 @@ class EpistemicAuthority:
                     reconciliation_required=False,
                 )
 
-            # Compatible or incomparable
+            # Compatible, unresolved, or incomparable
             if shared_topics or has_scope_overlap:
                 return AuthorityResolution(
                     disposition=ResolutionDisposition.AGREES,
@@ -299,6 +315,39 @@ class EpistemicAuthority:
 
             is_violation = intent_domain == AuthorityDomain.POLICY
             disp = ResolutionDisposition.VIOLATION if is_violation else ResolutionDisposition.DRIFT
+
+            # Check normalized structured propositions
+            subj_i = intent_item.get("subject") or intent_item.get("claim_key")
+            subj_c = code_item.get("subject") or code_item.get("claim_key")
+            if subj_i and subj_c and str(subj_i).lower() == str(subj_c).lower():
+                pol_i = intent_item.get("polarity", True)
+                pol_c = code_item.get("polarity", True)
+                obj_i = str(intent_item.get("object", "")).lower()
+                obj_c = str(code_item.get("object", "")).lower()
+                pred_i = str(intent_item.get("predicate", "")).lower()
+                pred_c = str(code_item.get("predicate", "")).lower()
+
+                if pol_i != pol_c or (obj_i and obj_c and obj_i != obj_c):
+                    return AuthorityResolution(
+                        disposition=disp,
+                        domain_a=domain_a,
+                        domain_b=domain_b,
+                        claims_conflict=True,
+                        winner=None,
+                        preserved_claims=[intent_item, code_item],
+                        reason=f"{disp.value}: Implementation diverges from structured proposition '{subj_i}'.",
+                        evidence=f"Intent: {pred_i} {obj_i} (polarity={pol_i}); Code: {pred_c} {obj_c} (polarity={pol_c})",
+                        reconciliation_required=True,
+                    )
+                else:
+                    return AuthorityResolution(
+                        disposition=ResolutionDisposition.AGREES,
+                        domain_a=domain_a,
+                        domain_b=domain_b,
+                        claims_conflict=False,
+                        preserved_claims=[claim_a, claim_b],
+                        reason="Implementation aligns with authoritative structured proposition.",
+                    )
 
             # Check if code violates or bypasses intent/policy
             violates = any(b in code_text for b in ("bypass", "skips", "missing", "violat", "omits", "without", "disables", "non-compliant", "breach"))
@@ -339,6 +388,31 @@ class EpistemicAuthority:
 
         # 3. IMPLEMENTATION vs IMPLEMENTATION
         if domain_a == AuthorityDomain.IMPLEMENTATION and domain_b == AuthorityDomain.IMPLEMENTATION:
+            # Check structured proposition
+            subj_a = claim_a.get("subject") or claim_a.get("claim_key")
+            subj_b = claim_b.get("subject") or claim_b.get("claim_key")
+            live_a = claim_a.get("is_live", False) or (claim_a.get("authority") == "code_observed" and not claim_a.get("scope"))
+            live_b = claim_b.get("is_live", False) or (claim_b.get("authority") == "code_observed" and not claim_b.get("scope"))
+
+            if subj_a and subj_b and str(subj_a).lower() == str(subj_b).lower():
+                pol_a = claim_a.get("polarity", True)
+                pol_b = claim_b.get("polarity", True)
+                obj_a = str(claim_a.get("object", "")).lower()
+                obj_b = str(claim_b.get("object", "")).lower()
+                if pol_a != pol_b or (obj_a and obj_b and obj_a != obj_b):
+                    winner = "current_code_evidence" if (live_a or live_b) else None
+                    return AuthorityResolution(
+                        disposition=ResolutionDisposition.RECORD_STALE if (live_a or live_b) else ResolutionDisposition.CONTRADICTED,
+                        domain_a=domain_a,
+                        domain_b=domain_b,
+                        claims_conflict=True,
+                        winner=winner,
+                        preserved_claims=[claim_b if live_b else claim_a],
+                        reason=f"Contradictory technical claim for structured proposition '{subj_a}'.",
+                        evidence=f"A: object={obj_a}, pol={pol_a}; B: object={obj_b}, pol={pol_b}",
+                        reconciliation_required=True,
+                    )
+
             if not has_scope_overlap and scopes_a and scopes_b and not any(s in text_b for s in scopes_a) and not any(s in text_a for s in scopes_b):
                 return AuthorityResolution(
                     disposition=ResolutionDisposition.INCOMPARABLE,
@@ -348,9 +422,6 @@ class EpistemicAuthority:
                     preserved_claims=[claim_a, claim_b],
                     reason="Distinct non-overlapping scopes.",
                 )
-
-            live_a = claim_a.get("is_live", False) or (claim_a.get("authority") == "code_observed" and not claim_a.get("scope"))
-            live_b = claim_b.get("is_live", False) or (claim_b.get("authority") == "code_observed" and not claim_b.get("scope"))
 
             # Contradiction signals for technical records: removed, deleted, renamed, deprecated (NO 'async'!)
             contradicts = any(term in text_a for term in ("removed", "deleted", "renamed", "deprecated")) or \

@@ -8,9 +8,14 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Optional
 from context_forge.core.evidence import screen_secrets
-from context_forge.providers.base import CodeIntelligenceProvider, ProviderResult, ProviderStatus
+from context_forge.providers.base import (
+    CodeIntelligenceProvider,
+    ProviderResult,
+    ProviderStatus,
+    VerificationKind,
+    verification_confidence,
+)
 
 
 def normalize_repo_path(p: Path | str) -> str:
@@ -108,7 +113,7 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
                 [str(exe), "--version"],
                 capture_output=True,
                 text=True,
-                timeout=5.0,
+                timeout=10.0,
                 check=False,
             )
             elapsed_ms = (time.monotonic() - t0) * 1000
@@ -119,6 +124,10 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
                     provider=self.name(),
                     version=version,
                     capabilities=self.DEFAULT_TOOLS,
+                    data={
+                        "adapter_supported_capabilities": self.DEFAULT_TOOLS,
+                        "discovered_capabilities": "unqueried",
+                    },
                     diagnostic=f"CBM CLI ready at {exe}",
                     execution_time_ms=elapsed_ms,
                 )
@@ -168,8 +177,14 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
                 out = res.stdout.strip()
                 try:
                     parsed = json.loads(out)
-                except (json.JSONDecodeError, UnicodeDecodeError):
-                    parsed = out
+                except (json.JSONDecodeError, UnicodeDecodeError) as json_err:
+                    return ProviderResult(
+                        status=ProviderStatus.MALFORMED,
+                        provider=self.name(),
+                        diagnostic_code="CBM_MALFORMED_JSON",
+                        diagnostic=screen_secrets(f"CBM tool '{tool_name}' returned malformed JSON: {json_err} (raw: {out[:120]})"),
+                        execution_time_ms=elapsed_ms,
+                    )
                 return ProviderResult(
                     status=ProviderStatus.OK,
                     provider=self.name(),
@@ -199,7 +214,11 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
                 diagnostic=screen_secrets(f"CBM tool '{tool_name}' invocation failed: {exc}"),
             )
 
-    def resolve_project(self, repo_path: Path | str) -> tuple[Optional[str], Optional[ProviderResult]]:
+    def resolve_project(
+        self,
+        repo_path: Path | str,
+        allow_index: bool = True,
+    ) -> tuple[Optional[str], Optional[ProviderResult]]:
         """Resolve a local repository path to a CBM project identity via list_projects / index_repository."""
         norm_target = normalize_repo_path(repo_path)
         now = time.monotonic()
@@ -234,20 +253,22 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
                     return proj_name, None
 
         # Project not found in CBM
-        if self.auto_index:
+        if self.auto_index and allow_index:
             idx_res = self.run_tool("index_repository", {"repo_path": str(Path(repo_path).resolve())}, timeout=15.0)
             if idx_res.is_ok():
-                # Re-query list_projects once
-                list_res2 = self.run_tool("list_projects", {})
-                if list_res2.is_ok() and isinstance(list_res2.data, (list, dict)):
-                    projs2 = list_res2.data if isinstance(list_res2.data, list) else list_res2.data.get("projects", [])
-                    for proj in projs2:
-                        if isinstance(proj, dict):
-                            p_path = proj.get("root_path") or proj.get("path") or ""
-                            p_name = proj.get("name") or proj.get("project") or ""
-                            if p_path and p_name and normalize_repo_path(p_path) == norm_target:
-                                self._project_cache[norm_target] = (p_name, now)
-                                return p_name, None
+                # Re-query list_projects once or bounded poll
+                for _ in range(3):
+                    list_res2 = self.run_tool("list_projects", {})
+                    if list_res2.is_ok() and isinstance(list_res2.data, (list, dict)):
+                        projs2 = list_res2.data if isinstance(list_res2.data, list) else list_res2.data.get("projects", [])
+                        for proj in projs2:
+                            if isinstance(proj, dict):
+                                p_path = proj.get("root_path") or proj.get("path") or ""
+                                p_name = proj.get("name") or proj.get("project") or ""
+                                if p_path and p_name and normalize_repo_path(p_path) == norm_target:
+                                    self._project_cache[norm_target] = (p_name, now)
+                                    return p_name, None
+                    time.sleep(0.3)
 
         return None, ProviderResult(
             status=ProviderStatus.UNINDEXED,
@@ -368,11 +389,109 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
                 diagnostic="codebase-memory-mcp binary not found.",
             )
 
-        project_name, err = self.resolve_project(repo_path)
+        project_name, err = self.resolve_project(repo_path, allow_index=False)
         if err is not None:
             return err
 
-        # If a symbol is specified, search for the symbol in the project graph
+        # Case 1: Relationship specified
+        if relationship:
+            query_target = symbol or path
+            res = self.run_tool(
+                "search_graph",
+                {
+                    "project": project_name,
+                    "query": query_target,
+                    "name_pattern": f"^{re.escape(symbol)}$" if symbol else ".*",
+                    "limit": 20,
+                },
+            )
+            if not res.is_ok():
+                return res
+
+            raw_data = res.data
+            nodes = raw_data if isinstance(raw_data, list) else (raw_data.get("results") or raw_data.get("nodes") or []) if isinstance(raw_data, dict) else []
+            rel_norm = relationship.lower().replace("-", "_")
+
+            found_rel = False
+            found_symbol = False
+
+            if isinstance(raw_data, dict):
+                edges = raw_data.get("edges") or raw_data.get("relationships") or []
+                for edge in edges:
+                    if isinstance(edge, dict):
+                        e_type = str(edge.get("type") or edge.get("relationship") or edge.get("kind") or "").lower().replace("-", "_")
+                        if e_type and (rel_norm in e_type or e_type in rel_norm):
+                            found_rel = True
+                            break
+
+            for node in nodes:
+                if isinstance(node, dict):
+                    name = node.get("name") or node.get("symbol") or ""
+                    if symbol and name == symbol:
+                        found_symbol = True
+                    n_rel = str(node.get("relationship") or node.get("relations") or "").lower().replace("-", "_")
+                    if n_rel and (rel_norm in n_rel or n_rel in rel_norm):
+                        found_rel = True
+                        break
+
+            if found_rel:
+                return ProviderResult(
+                    status=ProviderStatus.OK,
+                    provider=self.name(),
+                    project_name=project_name,
+                    data={
+                        "verification_kind": VerificationKind.STRUCTURAL_GRAPH.value,
+                        "structurally_verified": True,
+                        "confidence": verification_confidence(VerificationKind.STRUCTURAL_GRAPH),
+                        "path": path,
+                        "symbol": symbol,
+                        "relationship": relationship,
+                        "nodes": nodes,
+                    },
+                    diagnostic=f"Structural relationship '{relationship}' verified in CBM project '{project_name}'.",
+                )
+            elif found_symbol or nodes:
+                return ProviderResult(
+                    status=ProviderStatus.OK,
+                    provider=self.name(),
+                    project_name=project_name,
+                    data={
+                        "verification_kind": VerificationKind.SYMBOL_GRAPH.value,
+                        "structurally_verified": False,
+                        "confidence": verification_confidence(VerificationKind.SYMBOL_GRAPH),
+                        "path": path,
+                        "symbol": symbol,
+                        "relationship": relationship,
+                        "nodes": nodes,
+                    },
+                    diagnostic=f"Symbol '{query_target}' found in CBM graph, but relationship '{relationship}' was not structurally verified.",
+                )
+            else:
+                # Check filesystem existence inside repo
+                p_disk = Path(repo_path) / path
+                if p_disk.exists():
+                    return ProviderResult(
+                        status=ProviderStatus.OK,
+                        provider=self.name(),
+                        project_name=project_name,
+                        data={
+                            "verification_kind": VerificationKind.FILESYSTEM.value,
+                            "structurally_verified": False,
+                            "confidence": verification_confidence(VerificationKind.FILESYSTEM),
+                            "path": path,
+                            "symbol": symbol,
+                            "relationship": relationship,
+                        },
+                        diagnostic=f"Path '{path}' exists on disk; relationship '{relationship}' unverified by CBM.",
+                    )
+                return ProviderResult(
+                    status=ProviderStatus.NO_RESULTS,
+                    provider=self.name(),
+                    project_name=project_name,
+                    diagnostic=f"Reference '{query_target}' and relationship '{relationship}' not found in CBM project '{project_name}'.",
+                )
+
+        # Case 2: Symbol specified (without relationship)
         if symbol:
             res = self.run_tool(
                 "search_graph",
@@ -398,9 +517,55 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
                     status=ProviderStatus.OK,
                     provider=self.name(),
                     project_name=project_name,
-                    data={"symbol": symbol, "path": path, "nodes": nodes},
+                    data={
+                        "verification_kind": VerificationKind.SYMBOL_GRAPH.value,
+                        "structurally_verified": False,
+                        "confidence": verification_confidence(VerificationKind.SYMBOL_GRAPH),
+                        "symbol": symbol,
+                        "path": path,
+                        "nodes": nodes,
+                    },
                     diagnostic=f"Symbol '{symbol}' verified in CBM project '{project_name}'.",
                 )
+
+            # Fallback to search_code or filesystem
+            norm_path = path.replace("\\", "/")
+            code_res = self.run_tool(
+                "search_code",
+                {"project": project_name, "query": norm_path or symbol, "limit": 5},
+            )
+            if code_res.is_ok() and code_res.data:
+                return ProviderResult(
+                    status=ProviderStatus.OK,
+                    provider=self.name(),
+                    project_name=project_name,
+                    data={
+                        "verification_kind": VerificationKind.TEXT_SEARCH.value,
+                        "structurally_verified": False,
+                        "confidence": verification_confidence(VerificationKind.TEXT_SEARCH),
+                        "symbol": symbol,
+                        "path": path,
+                        "matches": code_res.data,
+                    },
+                    diagnostic=f"Symbol '{symbol}' matched via lexical code search in CBM project '{project_name}'.",
+                )
+
+            p_disk = Path(repo_path) / path
+            if path and p_disk.exists():
+                return ProviderResult(
+                    status=ProviderStatus.OK,
+                    provider=self.name(),
+                    project_name=project_name,
+                    data={
+                        "verification_kind": VerificationKind.FILESYSTEM.value,
+                        "structurally_verified": False,
+                        "confidence": verification_confidence(VerificationKind.FILESYSTEM),
+                        "symbol": symbol,
+                        "path": path,
+                    },
+                    diagnostic=f"Path '{path}' confirmed on disk; symbol '{symbol}' not found in CBM graph.",
+                )
+
             return ProviderResult(
                 status=ProviderStatus.NO_RESULTS,
                 provider=self.name(),
@@ -408,7 +573,7 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
                 diagnostic=f"Symbol '{symbol}' not found in CBM project '{project_name}'.",
             )
 
-        # If path is specified without symbol, search code in CBM or check disk
+        # Case 3: Only path specified (neither symbol nor relationship)
         if path:
             norm_path = path.replace("\\", "/")
             res = self.run_tool(
@@ -420,17 +585,27 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
                     status=ProviderStatus.OK,
                     provider=self.name(),
                     project_name=project_name,
-                    data={"path": path, "matches": res.data},
+                    data={
+                        "verification_kind": VerificationKind.TEXT_SEARCH.value,
+                        "structurally_verified": False,
+                        "confidence": verification_confidence(VerificationKind.TEXT_SEARCH),
+                        "path": path,
+                        "matches": res.data,
+                    },
                     diagnostic=f"Path '{path}' verified in CBM project '{project_name}'.",
                 )
-            # Check if file exists on disk inside repo_path
             p = Path(repo_path) / path
             if p.exists():
                 return ProviderResult(
                     status=ProviderStatus.OK,
                     provider=self.name(),
                     project_name=project_name,
-                    data={"path": path},
+                    data={
+                        "verification_kind": VerificationKind.FILESYSTEM.value,
+                        "structurally_verified": False,
+                        "confidence": verification_confidence(VerificationKind.FILESYSTEM),
+                        "path": path,
+                    },
                     diagnostic=f"Path '{path}' confirmed on disk in repository.",
                 )
             return ProviderResult(

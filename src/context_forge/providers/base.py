@@ -18,7 +18,36 @@ class ProviderStatus(str, Enum):
     INCOMPATIBLE = "incompatible"   # Schema or version mismatch / missing endpoint
     MALFORMED = "malformed"         # Bad JSON or malformed response
     TIMEOUT = "timeout"             # Call timed out
+    UNSUPPORTED = "unsupported"     # Requested capability/relationship not supported
     ERROR = "error"                 # Crash, exception, unexpected failure
+
+
+class VerificationKind(str, Enum):
+    """Classification of epistemic evidence used to verify a reference or edge."""
+    EXPLICIT_LINK = "explicit_link"        # Explicit durable trace link (~1.00)
+    STRUCTURAL_GRAPH = "structural_graph"  # CBM search_graph, trace_path, relationship query (~0.95)
+    SYMBOL_GRAPH = "symbol_graph"          # CBM symbol existence query (~0.90)
+    TEXT_SEARCH = "text_search"            # Grep / lexical search in files (~0.70)
+    FILESYSTEM = "filesystem"              # Native filesystem path check only (~0.50)
+    UNKNOWN = "unknown"                    # Missing or unverified (0.0)
+
+
+def verification_confidence(kind: VerificationKind | str) -> float:
+    """Centralized policy mapping verification evidence kinds to deterministic confidence scores."""
+    mapping = {
+        VerificationKind.EXPLICIT_LINK: 1.0,
+        VerificationKind.STRUCTURAL_GRAPH: 0.95,
+        VerificationKind.SYMBOL_GRAPH: 0.90,
+        VerificationKind.TEXT_SEARCH: 0.70,
+        VerificationKind.FILESYSTEM: 0.50,
+        VerificationKind.UNKNOWN: 0.0,
+    }
+    if isinstance(kind, str):
+        try:
+            kind = VerificationKind(kind)
+        except ValueError:
+            return 0.0
+    return mapping.get(kind, 0.0)
 
 
 @dataclass

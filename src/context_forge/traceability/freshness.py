@@ -8,7 +8,16 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 from context_forge.store.paths import brain_paths, read_text, atomic_write
+from context_forge.store.lock import repo_lock
 from context_forge.core.identity import get_git_info
+
+
+@dataclass
+class WorktreeStatusResult:
+    """Result of querying git status in working tree."""
+    status: str  # "OK", "NOT_GIT_REPOSITORY", "GIT_ERROR"
+    paths: list[str] = field(default_factory=list)
+    diagnostic: str = ""
 
 
 class GitComparisonStatus(str, Enum):
@@ -50,10 +59,14 @@ class FreshnessEvaluation:
     reason: str = ""
 
 
-def get_git_changed_paths(repo: Path) -> list[str]:
-    """Return uncommitted modified, untracked, or deleted paths in working tree."""
+def get_git_changed_paths_result(repo: Path) -> WorktreeStatusResult:
+    """Query uncommitted modified, untracked, or deleted paths with failure semantics."""
     if not (repo / ".git").exists():
-        return []
+        return WorktreeStatusResult(
+            status="NOT_GIT_REPOSITORY",
+            paths=[],
+            diagnostic="Not a git repository.",
+        )
     try:
         result = subprocess.run(
             ["git", "-C", str(repo), "status", "--porcelain"],
@@ -64,14 +77,30 @@ def get_git_changed_paths(repo: Path) -> list[str]:
             check=False,
         )
         if result.returncode != 0:
-            return []
+            return WorktreeStatusResult(
+                status="GIT_ERROR",
+                paths=[],
+                diagnostic=f"git status failed with exit code {result.returncode}: {result.stderr.strip()}",
+            )
         paths = []
         for line in result.stdout.splitlines():
             if len(line) >= 4:
                 paths.append(line[3:].split(" -> ")[-1].replace("\\", "/"))
-        return sorted(set(paths))
-    except (subprocess.SubprocessError, OSError):
-        return []
+        return WorktreeStatusResult(
+            status="OK",
+            paths=sorted(set(paths)),
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        return WorktreeStatusResult(
+            status="GIT_ERROR",
+            paths=[],
+            diagnostic=f"Failed to execute git status: {exc}",
+        )
+
+
+def get_git_changed_paths(repo: Path) -> list[str]:
+    """Return uncommitted modified, untracked, or deleted paths in working tree."""
+    return get_git_changed_paths_result(repo).paths
 
 
 def is_detached_head(repo: Path) -> bool:
@@ -293,7 +322,20 @@ def evaluate_record_freshness(
         )
 
     # 2. Check uncommitted working tree dirty files
-    dirty = set(get_git_changed_paths(repo)) if changed_files is None else set(changed_files)
+    if changed_files is None:
+        wt_res = get_git_changed_paths_result(repo)
+        if wt_res.status == "GIT_ERROR":
+            return FreshnessEvaluation(
+                record_id=rec_id,
+                status="unverified",
+                comparison_status=GitComparisonStatus.GIT_ERROR,
+                linked_paths=linked_paths,
+                reason=f"Working tree dirty state could not be verified: {wt_res.diagnostic}",
+            )
+        dirty = set(wt_res.paths)
+    else:
+        dirty = set(changed_files)
+
     dirty_overlap = sorted(dirty.intersection(linked_paths))
     if dirty_overlap:
         return FreshnessEvaluation(
@@ -467,27 +509,28 @@ def check_record_freshness(
 def update_repository_freshness(repo: Path) -> dict[str, str]:
     """Scan all technical and traceability records, updating freshness in place."""
     p = brain_paths(repo)
-    changed = set(get_git_changed_paths(repo))
-    status_map = {}
+    with repo_lock(p):
+        changed = set(get_git_changed_paths(repo))
+        status_map = {}
 
-    for folder_key in ("technical", "traceability"):
-        folder = p[folder_key]
-        if not folder.exists():
-            continue
-        for page in folder.glob("*.md"):
-            freshness = check_record_freshness(repo, page, changed)
-            status_map[page.name] = freshness
-            # Update freshness in frontmatter if changed
-            text = read_text(page)
-            if "freshness:" in text:
-                new_text = re.sub(r"(?m)^freshness:\s*.*$", f"freshness: {freshness}", text)
-            elif "---\n" in text:
-                new_text = text.replace("---\n", f"---\nfreshness: {freshness}\n", 1)
-            elif "---\r\n" in text:
-                new_text = text.replace("---\r\n", f"---\r\nfreshness: {freshness}\r\n", 1)
-            else:
-                new_text = text
-            if new_text != text:
-                atomic_write(page, new_text)
+        for folder_key in ("technical", "traceability"):
+            folder = p[folder_key]
+            if not folder.exists():
+                continue
+            for page in folder.glob("*.md"):
+                freshness = check_record_freshness(repo, page, changed)
+                status_map[page.name] = freshness
+                # Update freshness in frontmatter if changed
+                text = read_text(page)
+                if "freshness:" in text:
+                    new_text = re.sub(r"(?m)^freshness:\s*.*$", f"freshness: {freshness}", text)
+                elif "---\n" in text:
+                    new_text = text.replace("---\n", f"---\nfreshness: {freshness}\n", 1)
+                elif "---\r\n" in text:
+                    new_text = text.replace("---\r\n", f"---\r\nfreshness: {freshness}\r\n", 1)
+                else:
+                    new_text = text
+                if new_text != text:
+                    atomic_write(page, new_text)
 
-    return status_map
+        return status_map

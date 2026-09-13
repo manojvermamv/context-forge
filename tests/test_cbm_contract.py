@@ -85,6 +85,67 @@ class TestCBMContract(unittest.TestCase):
             ref_res = cbm.verify_reference(repo_path=repo_dir, path="src/auth.py", symbol="AuthService")
             self.assertEqual(ref_res.status, ProviderStatus.OK)
             self.assertEqual(ref_res.data["symbol"], "AuthService")
+            self.assertEqual(ref_res.data["verification_kind"], "symbol_graph")
+            self.assertEqual(ref_res.data["confidence"], 0.90)
+            self.assertFalse(ref_res.data["structurally_verified"])
+
+    def test_relationship_verification_distinguishes_structural_vs_symbol(self) -> None:
+        """Verify that relationship verification returns structural_graph only when relationship matches."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            repo_dir = tmp_dir / "rel_project"
+            repo_dir.mkdir()
+
+            runner = tmp_dir / "cbm_runner.py"
+            runner.write_text(
+                'import sys, json\n'
+                'if "--version" in sys.argv:\n'
+                '    print("0.10.8")\n'
+                'elif len(sys.argv) >= 3 and sys.argv[1] == "cli":\n'
+                '    tool = sys.argv[2]\n'
+                '    args = json.loads(sys.argv[3]) if len(sys.argv) > 3 else {}\n'
+                '    if tool == "list_projects":\n'
+                f'        print(json.dumps([{{\n'
+                f'            "name": "rel-proj-id",\n'
+                f'            "root_path": "{str(repo_dir.resolve()).replace(chr(92), "/")}",\n'
+                f'        }}]))\n'
+                '    elif tool == "search_graph":\n'
+                '        q = args.get("query", "")\n'
+                '        if "TokenService" in q:\n'
+                '            print(json.dumps({\n'
+                '                "nodes": [{"name": "TokenService", "path": "src/token.py"}],\n'
+                '                "edges": [{"type": "implements", "source": "TokenService", "target": "IToken"}]\n'
+                '            }))\n'
+                '        else:\n'
+                '            print(json.dumps([]))\n'
+                '    else:\n'
+                '        print(json.dumps([]))\n',
+                encoding="utf-8",
+            )
+
+            if sys.platform == "win32":
+                mock_exe = tmp_dir / "mock_cbm.bat"
+                mock_exe.write_text(f'@echo off\n"{sys.executable}" "{runner}" %*\n', encoding="utf-8")
+            else:
+                mock_exe = tmp_dir / "mock_cbm"
+                mock_exe.write_text(f'#!/bin/sh\n"{sys.executable}" "{runner}" "$@"\n', encoding="utf-8")
+                mock_exe.chmod(mock_exe.stat().st_mode | stat.S_IEXEC)
+
+            cbm = CodebaseMemoryMCPProvider(executable_path=str(mock_exe))
+
+            # Case A: relationship matches edge
+            res_match = cbm.verify_reference(repo_path=repo_dir, path="src/token.py", symbol="TokenService", relationship="implements")
+            self.assertEqual(res_match.status, ProviderStatus.OK)
+            self.assertEqual(res_match.data["verification_kind"], "structural_graph")
+            self.assertTrue(res_match.data["structurally_verified"])
+            self.assertEqual(res_match.data["confidence"], 0.95)
+
+            # Case B: symbol matches, but requested relationship is missing
+            res_no_rel = cbm.verify_reference(repo_path=repo_dir, path="src/token.py", symbol="TokenService", relationship="calls_database")
+            self.assertEqual(res_no_rel.status, ProviderStatus.OK)
+            self.assertEqual(res_no_rel.data["verification_kind"], "symbol_graph")
+            self.assertFalse(res_no_rel.data["structurally_verified"])
+            self.assertEqual(res_no_rel.data["confidence"], 0.90)
 
     def test_cbm_root_plumbing_distinct_from_scope_paths(self) -> None:
         """Adversarial test: repository root != cwd, scope_paths contains relative and absolute files."""
@@ -123,7 +184,7 @@ class TestCBMContract(unittest.TestCase):
             else:
                 mock_exe = tmp_dir / "mock_cbm"
                 mock_exe.write_text(f'#!/bin/sh\n"{sys.executable}" "{runner}" "$@"\n', encoding="utf-8")
-                mock_exe.chmod(mock_exe.stat().st_mode | stat.S_IEXEC)
+                mock_exe.chmod(mock_exe.stat().S_IEXEC | stat.S_IEXEC)
 
             cbm = CodebaseMemoryMCPProvider(executable_path=str(mock_exe))
 
@@ -199,29 +260,48 @@ class TestCBMContract(unittest.TestCase):
             self.assertEqual(res.status, ProviderStatus.ERROR)
             self.assertIn("Fatal crash", res.diagnostic)
 
+    def test_malformed_json_returns_malformed_status(self) -> None:
+        """Verify tool returning exit 0 with non-JSON output surfaces as ProviderStatus.MALFORMED."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            runner = tmp_dir / "cbm_runner.py"
+            runner.write_text('import sys\nprint("Not valid json at all")\n', encoding="utf-8")
+
+            if sys.platform == "win32":
+                mock_exe = tmp_dir / "mock_cbm.bat"
+                mock_exe.write_text(f'@echo off\n"{sys.executable}" "{runner}" %*\n', encoding="utf-8")
+            else:
+                mock_exe = tmp_dir / "mock_cbm"
+                mock_exe.write_text(f'#!/bin/sh\n"{sys.executable}" "{runner}" "$@"\n', encoding="utf-8")
+                mock_exe.chmod(mock_exe.stat().st_mode | stat.S_IEXEC)
+
+            cbm = CodebaseMemoryMCPProvider(executable_path=str(mock_exe))
+            res = cbm.run_tool("list_projects", {})
+            self.assertEqual(res.status, ProviderStatus.MALFORMED)
+            self.assertEqual(res.diagnostic_code, "CBM_MALFORMED_JSON")
+
     def test_live_cbm_health_opt_in(self) -> None:
-        """Opt-in live CBM health test (RUN_CBM_LIVE_TESTS=1)."""
+        """Opt-in live CBM health test (RUN_CBM_LIVE_TESTS=1). Fails if enabled and unhealthy."""
         if os.environ.get("RUN_CBM_LIVE_TESTS") != "1":
             self.skipTest("Live CBM tests not enabled. Set RUN_CBM_LIVE_TESTS=1 to run.")
 
         cbm = CodebaseMemoryMCPProvider()
         health = cbm.check_health()
         if not health.is_ok():
-            self.skipTest(f"Live CBM binary not available or healthy: {health.diagnostic}")
+            self.fail(f"Live CBM binary not available or healthy: {health.diagnostic}")
 
         self.assertTrue(health.version != "", "Live CBM must report a version")
 
     def test_live_cbm_e2e_query_opt_in(self) -> None:
-        """Opt-in live CBM end-to-end structural query test (RUN_CBM_LIVE_TESTS=1)."""
+        """Opt-in live CBM end-to-end structural query test (RUN_CBM_LIVE_TESTS=1). Fails if enabled and broken."""
         if os.environ.get("RUN_CBM_LIVE_TESTS") != "1":
             self.skipTest("Live CBM tests not enabled. Set RUN_CBM_LIVE_TESTS=1 to run.")
 
         cbm = CodebaseMemoryMCPProvider()
         health = cbm.check_health()
         if not health.is_ok():
-            self.skipTest(f"Live CBM binary not available: {health.diagnostic}")
+            self.fail(f"Live CBM binary not available: {health.diagnostic}")
 
-        # If available, test real structural query against repository root
         root = Path(__file__).resolve().parents[1]
         res = cbm.query_impact_result(repo_path=root, query="ContextPack", scope_paths=["src/context_forge/core/models.py"])
         self.assertIn(

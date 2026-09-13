@@ -254,6 +254,71 @@ class AuthorityAndConflictTestCase(unittest.TestCase):
         stales = ConflictResolver.detect_stale_records([tech], [fact])
         self.assertEqual(len(stales), 0, "Async code must not be treated as a stale contradiction keyword")
 
+    def test_structured_propositions_polarity_conflict(self):
+        """Structured proposition with opposing polarity creates typed conflict."""
+        intent = {
+            "id": "REQ-020",
+            "kind": "requirement",
+            "authority": "user_explicit",
+            "subject": "tls_enforcement",
+            "predicate": "requires",
+            "object": "tls_1_3",
+            "polarity": True,
+        }
+        impl = {
+            "path": "src/net.py",
+            "kind": "technical",
+            "authority": "code_observed",
+            "subject": "tls_enforcement",
+            "predicate": "requires",
+            "object": "tls_1_3",
+            "polarity": False,
+        }
+        res = EpistemicAuthority.resolve_claims(intent, impl)
+        self.assertTrue(res.claims_conflict)
+        self.assertEqual(res.disposition, ResolutionDisposition.DRIFT)
+
+    def test_structured_propositions_agreement(self):
+        """Structured proposition with matching polarity and object agrees."""
+        intent = {
+            "id": "ADR-030",
+            "kind": "decision",
+            "authority": "user_explicit",
+            "subject": "cache_tier",
+            "predicate": "uses",
+            "object": "redis",
+            "polarity": True,
+        }
+        exp = {
+            "source": "agentmemory",
+            "authority": "procedural_memory",
+            "subject": "cache_tier",
+            "predicate": "uses",
+            "object": "redis",
+            "polarity": True,
+        }
+        res = EpistemicAuthority.resolve_claims(intent, exp)
+        self.assertFalse(res.claims_conflict)
+        self.assertEqual(res.disposition, ResolutionDisposition.AGREES)
+
+    def test_no_hardcoded_ontology_assumptions(self):
+        """Without explicit negation, disparate technology mentions must NOT manufacture conflicts."""
+        intent = {
+            "id": "ADR-099",
+            "kind": "decision",
+            "authority": "user_explicit",
+            "title": "Use RabbitMQ for job queue",
+            "body": "We use RabbitMQ for task queues in background processing.",
+        }
+        exp = {
+            "source": "agentmemory",
+            "authority": "procedural_memory",
+            "finding": "Consider Kafka for streaming metric logs.",
+        }
+        res = EpistemicAuthority.resolve_claims(intent, exp)
+        self.assertFalse(res.claims_conflict, "Disparate technologies must not be manufactured into conflict")
+        self.assertNotEqual(res.disposition, ResolutionDisposition.ADVICE_REJECTED)
+
 
 if __name__ == "__main__":
     unittest.main()

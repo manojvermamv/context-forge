@@ -132,13 +132,14 @@ def cmd_doctor(repo: Path) -> None:
     cbm_health = cbm.check_health()
     print("  codebase memory mcp (cbm) [code intelligence plane]:")
     print(f"    configured: {'yes' if cbm_configured else 'optional (not explicitly configured)'}")
-    print(f"    binary discovered: {'yes' if cbm.is_available() else 'no'}")
-    if cbm.is_available():
+    cbm_available = cbm_health.status != ProviderStatus.UNAVAILABLE
+    print(f"    binary discovered: {'yes' if cbm_available else 'no'}")
+    if cbm_available:
         exe = cbm._resolve_executable()
         print(f"    binary path: {exe}")
         print(f"    version: {cbm_health.version or 'unknown'}")
         print("    transport: stdio / cli")
-        proj_name, proj_err = cbm.resolve_project(repo)
+        proj_name, proj_err = cbm.resolve_project(repo, allow_index=False)
         if proj_name:
             print(f"    indexed project: {proj_name}")
         else:

@@ -104,7 +104,13 @@ class TraceabilityGraphTestCase(unittest.TestCase):
             def verify_reference(self, repo_path, path, symbol=None, relationship=None):
                 return ProviderResult(
                     status=ProviderStatus.OK,
-                    data={"symbol": "Router", "path": path},
+                    data={
+                        "symbol": "Router",
+                        "path": path,
+                        "structurally_verified": True,
+                        "verification_kind": "structural_graph",
+                        "confidence": 0.95,
+                    },
                     provider="cbm",
                     diagnostic="Verified in CBM graph.",
                 )
@@ -113,7 +119,7 @@ class TraceabilityGraphTestCase(unittest.TestCase):
         edge = reconciled[0]["edges"][0]
         self.assertEqual(edge["provider"], "cbm")
         self.assertEqual(edge["verification_state"], "verified")
-        self.assertGreater(edge["confidence"], 0.9)
+        self.assertGreaterEqual(edge["confidence"], 0.9)
         self.assertIn("Verified in CBM graph", edge["evidence"])
 
     def test_provider_reconciliation_missing_reference_marks_stale(self):

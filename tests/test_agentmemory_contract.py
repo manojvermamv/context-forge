@@ -50,23 +50,48 @@ class TestAgentMemoryContract(unittest.TestCase):
                         self.send_header("Content-Type", "application/json")
                         self.end_headers()
                         self.wfile.write(json.dumps({"foo": "bar", "unknown_service": 123}).encode("utf-8"))
+                    elif auth == "Bearer secret-status-ok":
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.end_headers()
+                        self.wfile.write(json.dumps({"status": "ok"}).encode("utf-8"))
+                    elif auth == "Bearer secret-version-only":
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.end_headers()
+                        self.wfile.write(json.dumps({"version": "1.0"}).encode("utf-8"))
+                    elif auth == "Bearer secret-degraded":
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.end_headers()
+                        self.wfile.write(json.dumps({"status": "degraded", "service": "agentmemory", "version": "1.4.2"}).encode("utf-8"))
                     elif auth == "Bearer secret-server-error":
                         self.send_response(500)
                         self.send_header("Content-Type", "application/json")
                         self.end_headers()
                         self.wfile.write(b'{"error": "Internal Server Error"}')
+                    elif auth == "Bearer secret-503-am":
+                        self.send_response(503)
+                        self.send_header("Content-Type", "application/json")
+                        self.end_headers()
+                        self.wfile.write(json.dumps({"service": "agentmemory", "status": "degraded"}).encode("utf-8"))
                     else:
                         self.send_response(401)
                         self.send_header("Content-Type", "application/json")
                         self.end_headers()
                         self.wfile.write(b'{"error": "Unauthorized"}')
+                elif self.path == "/agentmemory/livez":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"status": "alive"}).encode("utf-8"))
                 else:
                     self.send_response(404)
                     self.end_headers()
 
             def do_POST(self):
                 auth = self.headers.get("Authorization", "")
-                if auth != "Bearer secret-token-valid":
+                if auth not in ("Bearer secret-token-valid", "Bearer secret-degraded"):
                     self.send_response(401)
                     self.end_headers()
                     return
@@ -118,31 +143,54 @@ class TestAgentMemoryContract(unittest.TestCase):
             am_empty = AgentMemoryProvider(endpoint_url=url, secret="secret-empty-json")
             h_empty = am_empty.check_health()
             self.assertEqual(h_empty.status, ProviderStatus.INCOMPATIBLE)
-            self.assertIn("unrecognized JSON", h_empty.diagnostic)
+            self.assertIn("AgentMemory identity", h_empty.diagnostic)
 
             # 4. Arbitrary {"foo": "bar"} with HTTP 200 -> INCOMPATIBLE (reject unrelated HTTP services)
             am_arb = AgentMemoryProvider(endpoint_url=url, secret="secret-arbitrary-json")
             h_arb = am_arb.check_health()
             self.assertEqual(h_arb.status, ProviderStatus.INCOMPATIBLE)
-            self.assertIn("unrecognized JSON", h_arb.diagnostic)
 
-            # 5. HTTP 500 -> ERROR
+            # 5. Arbitrary {"status": "ok"} without agentmemory identity -> INCOMPATIBLE
+            am_status_ok = AgentMemoryProvider(endpoint_url=url, secret="secret-status-ok")
+            h_status_ok = am_status_ok.check_health()
+            self.assertEqual(h_status_ok.status, ProviderStatus.INCOMPATIBLE)
+
+            # 6. Arbitrary {"version": "1.0"} without agentmemory identity -> INCOMPATIBLE
+            am_version_only = AgentMemoryProvider(endpoint_url=url, secret="secret-version-only")
+            h_version_only = am_version_only.check_health()
+            self.assertEqual(h_version_only.status, ProviderStatus.INCOMPATIBLE)
+
+            # 7. Degraded mode {"status": "degraded"} -> DEGRADED and is_available() == True
+            am_degraded = AgentMemoryProvider(endpoint_url=url, secret="secret-degraded")
+            h_deg = am_degraded.check_health()
+            self.assertEqual(h_deg.status, ProviderStatus.DEGRADED)
+            self.assertTrue(am_degraded.is_available())
+            res_deg = am_degraded.recall_lessons_result("locks")
+            self.assertEqual(res_deg.status, ProviderStatus.OK)
+            self.assertEqual(len(res_deg.data), 1)
+
+            # 8. HTTP 503 with AgentMemory identity -> DEGRADED
+            am_503 = AgentMemoryProvider(endpoint_url=url, secret="secret-503-am")
+            h_503 = am_503.check_health()
+            self.assertEqual(h_503.status, ProviderStatus.DEGRADED)
+
+            # 9. HTTP 500 -> ERROR
             am_err = AgentMemoryProvider(endpoint_url=url, secret="secret-server-error")
             h_err = am_err.check_health()
             self.assertEqual(h_err.status, ProviderStatus.ERROR)
 
-            # 6. Invalid auth -> UNAUTHORIZED
+            # 10. Invalid auth -> UNAUTHORIZED
             am_bad_auth = AgentMemoryProvider(endpoint_url=url, secret="wrong-secret")
             h_bad = am_bad_auth.check_health()
             self.assertEqual(h_bad.status, ProviderStatus.UNAUTHORIZED)
 
-            # 7. Search results
+            # 11. Search results
             res = am_valid.recall_lessons_result("locks")
             self.assertEqual(res.status, ProviderStatus.OK)
             self.assertEqual(len(res.data), 1)
             self.assertIn("Redis advisory locks", res.data[0]["finding"])
 
-            # 8. Search zero results -> NO_RESULTS
+            # 12. Search zero results -> NO_RESULTS
             res_empty = am_valid.recall_lessons_result("empty")
             self.assertEqual(res_empty.status, ProviderStatus.NO_RESULTS)
             self.assertEqual(res_empty.data, [])
@@ -152,28 +200,27 @@ class TestAgentMemoryContract(unittest.TestCase):
             server.server_close()
 
     def test_live_agentmemory_health_opt_in(self) -> None:
-        """Opt-in live AgentMemory health test (RUN_AGENTMEMORY_LIVE_TESTS=1)."""
+        """Opt-in live AgentMemory health test (RUN_AGENTMEMORY_LIVE_TESTS=1). Fails if enabled and unhealthy."""
         if os.environ.get("RUN_AGENTMEMORY_LIVE_TESTS") != "1":
             self.skipTest("Live AgentMemory tests not enabled. Set RUN_AGENTMEMORY_LIVE_TESTS=1 to run.")
 
         am = AgentMemoryProvider()
         health = am.check_health()
         if not health.is_ok():
-            self.skipTest(f"Live AgentMemory server not available or healthy: {health.diagnostic}")
+            self.fail(f"Live AgentMemory server not available or healthy: {health.diagnostic}")
 
         self.assertTrue(health.is_ok(), "Live AgentMemory must be healthy")
 
     def test_live_agentmemory_e2e_recall_opt_in(self) -> None:
-        """Opt-in live AgentMemory end-to-end recall test (RUN_AGENTMEMORY_LIVE_TESTS=1)."""
+        """Opt-in live AgentMemory end-to-end recall test (RUN_AGENTMEMORY_LIVE_TESTS=1). Fails if enabled and broken."""
         if os.environ.get("RUN_AGENTMEMORY_LIVE_TESTS") != "1":
             self.skipTest("Live AgentMemory tests not enabled. Set RUN_AGENTMEMORY_LIVE_TESTS=1 to run.")
 
         am = AgentMemoryProvider()
         health = am.check_health()
         if not health.is_ok():
-            self.skipTest(f"Live AgentMemory server not available: {health.diagnostic}")
+            self.fail(f"Live AgentMemory server not available: {health.diagnostic}")
 
-        # If available, integration must work; do not skip broken integration!
         res = am.recall_lessons_result("concurrency lock architecture", limit=3)
         self.assertIn(
             res.status,
