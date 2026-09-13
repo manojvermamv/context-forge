@@ -7,15 +7,19 @@ description: Portable, reviewable project knowledge in .brain/ for coding agents
 
 Use this protocol when the repository contains `.brain/`. It is a portable knowledge base, not a license to write unreviewed agent summaries as fact.
 
-## Read progressively
+## Read progressively & Federated Context Compilation
 
-1. Read `.brain/index.md` first. It is the small routing layer.
-2. Read `.brain/current-state.md` and `.brain/status.md` for active decisions, blockers, and next steps.
+1. **For general routing:** Read `.brain/index.md` first (the small routing layer), followed by `.brain/current-state.md` and `.brain/status.md` for active decisions, blockers, and next steps.
+2. **For focused task compilation:** Run `brain.py context <repo> "task words"`. This federates:
+   - **Project Truth:** Authoritative requirements (`REQ`) and decisions (`ADR`).
+   - **Code Reality:** Structural code impact from Codebase-Memory-MCP (CBM) or native code map.
+   - **Agent Experience:** Past session lessons from AgentMemory or native log.
+   - **Cross-Plane Drift Alerts:** Discrepancies between intent and current implementation.
+   - **Bounded Next Reading:** Prioritized task-specific files and baseline docs within strict token budget.
 3. Open only the relevant decision, requirement, technical, question, concept, or map page.
 4. Before a broad code search, read `.brain/map.md`; regenerate it with `brain.py map <repo>` if structure has materially changed.
-5. For agents without hooks, use `brain.py context <repo> "task words"` to produce the same bounded reading list.
 
-Never load the entire `.brain/` directory just because it exists. The bounded hot tier and on-demand store are the token-saving contract.
+Never load the entire `.brain/` directory just because it exists. Bounded progressive disclosure is the token-saving contract.
 
 ## Automatic hook behavior
 

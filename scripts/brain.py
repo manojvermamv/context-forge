@@ -62,16 +62,19 @@ def main(argv=None) -> int:
     p_context.add_argument("repo", type=Path)
     p_context.add_argument("query", nargs="*", help="task words for a routed reading list")
     p_context.add_argument("--path", dest="paths", action="append", default=[], help="affected source path")
+    p_context.add_argument("--pointers-only", action="store_true", help="output only routed file reading pointers")
+    p_context.add_argument("--format", dest="output_format", choices=["text", "json"], default="text", help="output format (text or json)")
+    p_context.add_argument("--explain", action="store_true", help="include provider diagnostics explanation")
 
     p_update = sub.add_parser("update")
     p_update.add_argument("repo", type=Path)
-    p_update.add_argument("--kind", choices=["decision", "requirement", "technical", "question"], required=True)
+    p_update.add_argument("--kind", choices=["decision", "requirement", "technical", "question", "policy", "invariant"], required=True)
     p_update.add_argument("--title", required=True)
     p_update.add_argument("--body", required=True)
     p_update.add_argument(
         "--authority",
         required=True,
-        choices=["user_explicit", "code_observed", "unresolved", "agent_inference", "external_source"],
+        choices=["user_explicit", "policy_mandate", "code_observed", "unresolved", "agent_inference", "external_source"],
     )
     p_update.add_argument("--evidence", default="")
     p_update.add_argument("--scope", action="append", default=[])
@@ -129,7 +132,14 @@ def main(argv=None) -> int:
     elif args.cmd == "index":
         cmd_index(args.repo)
     elif args.cmd == "context":
-        cmd_context(args.repo, " ".join(args.query), args.paths)
+        cmd_context(
+            args.repo,
+            " ".join(args.query),
+            args.paths,
+            pointers_only=getattr(args, "pointers_only", False),
+            output_format=getattr(args, "output_format", "text"),
+            explain=getattr(args, "explain", False),
+        )
     elif args.cmd == "update":
         identity = build_identity_envelope(repo=args.repo, agent_id=args.agent_id, agent_role=args.agent_role)
         return create_knowledge_record(

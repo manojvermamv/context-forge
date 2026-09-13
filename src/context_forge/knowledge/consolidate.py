@@ -46,10 +46,12 @@ def plan_or_apply_consolidation(repo: Path, apply: bool = False) -> int:
         f"consolidated {now_iso()})\n\n_Raw entries removed from log.md after this point; "
         f"this page is the durable record._\n\n"
     )
-    atomic_write(target_concept, header + "".join(aged))
-    atomic_write(p["log"], "".join(kept) or "# log.md\n\n_(rotated — see concepts/log-summary-*.md for history)_\n")
-    sync_routing_index(p)
-    write_registry(repo, p)
+    from context_forge.store.lock import repo_lock
+    with repo_lock(p):
+        atomic_write(target_concept, header + "".join(aged))
+        atomic_write(p["log"], "".join(kept) or "# log.md\n\n_(rotated — see concepts/log-summary-*.md for history)_\n")
+        sync_routing_index(p)
+        write_registry(repo, p)
 
     print(f"[brain] consolidated {len(aged)} aged entries into {target_concept.relative_to(repo)}")
     return 0

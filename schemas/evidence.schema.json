@@ -4,7 +4,7 @@
   "title": "ContextForgeEvidence",
   "description": "Sanitized evidence statement, proof references, and verification digest.",
   "type": "object",
-  "required": ["statement", "authority_level"],
+  "required": ["statement"],
   "properties": {
     "statement": {
       "type": "string",
@@ -18,7 +18,17 @@
     },
     "source_type": {
       "type": "string",
-      "enum": ["user_input", "code_ast", "git_commit", "test_result", "audit_log", "external_doc"]
+      "enum": [
+        "user_input",
+        "code_observed",
+        "code_ast",
+        "git_commit",
+        "test_result",
+        "audit_log",
+        "external_doc",
+        "agent_inference",
+        "derived_link"
+      ]
     },
     "source_refs": {
       "type": "array",
@@ -29,9 +39,28 @@
       "type": "boolean",
       "default": false
     },
-    "verified_at": {
+    "digest": {
       "type": "string",
-      "format": "date-time"
+      "description": "Cryptographic or content digest of the observed evidence."
+    },
+    "observed_commit": {
+      "type": "string",
+      "description": "Full Git commit SHA at which evidence was captured."
+    },
+    "producer": {
+      "type": "string",
+      "description": "Producer tool or human authoring this evidence."
+    },
+    "verification_state": {
+      "type": "string",
+      "enum": ["verified", "unverified", "possibly_stale", "stale", "contradicted"],
+      "default": "unverified"
+    },
+    "verified_at": {
+      "type": "string"
+    },
+    "created_at": {
+      "type": "string"
     }
   }
 }

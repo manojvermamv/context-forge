@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from typing import Any, Optional
+from context_forge.core.budgets import Budgets
 
 
 def now_iso() -> str:
@@ -17,55 +18,117 @@ def today() -> str:
 @dataclass
 class IdentityEnvelope:
     """Provenance and identity of the actor (human, agent, team, session, tool) creating or updating knowledge."""
+    schema_version: str = "2.0"
     project_id: str = ""
-    repository: str = ""
-    commit_sha: str = ""
-    branch: str = ""
-    worktree: str = ""
-    team_id: str = ""
-    agent_id: str = ""
-    agent_role: str = ""  # architect, developer, reviewer, tester, human_user, etc.
+    repository: str = ""               # alias: repository_id
+    repository_id: str = ""
+    branch: str = ""                   # alias: branch_or_ref
+    branch_or_ref: str = ""
+    commit_sha: str = ""               # full git commit sha (40-char)
+    worktree: str = ""                 # alias: worktree_id
+    worktree_id: str = ""
+    task_id: str = ""
     session_id: str = ""
     conversation_id: str = ""
-    task_id: str = ""
-    producer: str = ""         # Actor or tool producing knowledge (e.g. cbm, agentmemory, user, hook, pytest)
-    producer_type: str = ""    # human, agent, mcp_tool, hook, test_runner, ci
+    checkpoint_id: str = ""
+    team_id: str = ""
+    agent_id: str = ""
+    agent_role: str = ""               # architect, developer, reviewer, security_auditor, tester, researcher, coordinator, human_user, etc.
+    producer: str = ""                 # Actor or tool producing knowledge (e.g. cbm, agentmemory, user, hook, pytest)
+    producer_type: str = ""            # human, agent, mcp_tool, hook, test_runner, ci, scanner, external_doc
     producer_id: str = ""
     producer_version: str = ""
-    reviewer: str = ""
-    harness: str = ""          # antigravity, cursor, claude-code, codex, cli
+    reviewer: str = ""                 # alias: reviewer_id
+    reviewer_id: str = ""
+    harness: str = ""                  # antigravity, cursor, claude-code, codex, cli
     model_provider: str = ""
     model_id: str = ""
-    authority_domain: str = "" # INTENT, POLICY, IMPLEMENTATION, EXPERIENCE
-    authority_level: int = 70
-    schema_version: str = "2.0"
-    checkpoint_id: str = ""
-    timestamp: str = field(default_factory=now_iso)
+    authority_domain: str = ""         # INTENT, POLICY, IMPLEMENTATION, EXPERIENCE
+    authority_level: int = 0
+    created_at: str = ""               # alias: timestamp
+    timestamp: str = ""
+    observed_at: str = ""
+
+    def __post_init__(self) -> None:
+        # Reconcile aliases
+        if self.repository and not self.repository_id:
+            self.repository_id = self.repository
+        elif self.repository_id and not self.repository:
+            self.repository = self.repository_id
+
+        if self.branch and not self.branch_or_ref:
+            self.branch_or_ref = self.branch
+        elif self.branch_or_ref and not self.branch:
+            self.branch = self.branch_or_ref
+
+        if self.worktree and not self.worktree_id:
+            self.worktree_id = self.worktree
+        elif self.worktree_id and not self.worktree:
+            self.worktree = self.worktree_id
+
+        if self.reviewer and not self.reviewer_id:
+            self.reviewer_id = self.reviewer
+        elif self.reviewer_id and not self.reviewer:
+            self.reviewer = self.reviewer_id
+
+        if self.timestamp and not self.created_at:
+            self.created_at = self.timestamp
+        elif self.created_at and not self.timestamp:
+            self.timestamp = self.created_at
 
     def to_dict(self) -> dict[str, Any]:
-        return {k: v for k, v in asdict(self).items() if v}
+        data = asdict(self)
+        # Filter out empty string/0/None for clean serialization
+        return {k: v for k, v in data.items() if v not in ("", 0, None, [], {})}
 
     @classmethod
     def from_dict(cls, data: Optional[dict[str, Any]]) -> "IdentityEnvelope":
         if not data or not isinstance(data, dict):
             return cls()
-        valid = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
+        valid: dict[str, Any] = {}
+        for k, v in data.items():
+            if k in cls.__dataclass_fields__:
+                valid[k] = v
+            # Map known external alias keys
+            elif k == "branch_or_ref":
+                valid["branch"] = v
+                valid["branch_or_ref"] = v
+            elif k == "repository_id":
+                valid["repository"] = v
+                valid["repository_id"] = v
+            elif k == "worktree_id":
+                valid["worktree"] = v
+                valid["worktree_id"] = v
+            elif k == "reviewer_id":
+                valid["reviewer"] = v
+                valid["reviewer_id"] = v
+            elif k == "created_at":
+                valid["timestamp"] = v
+                valid["created_at"] = v
         return cls(**valid)
-
 
 
 @dataclass
 class EvidenceStatement:
     """Sanitized evidence statement proving the claim without secrets or raw chat dumps."""
-    statement: str
-    authority_level: int = 70  # 100=user_explicit, 80=code_observed, etc.
-    source_type: str = "code_observed"  # user_input, code_ast, git_commit, test_result, etc.
+    statement: str = "Not supplied."
+    authority_level: int = 0
+    source_type: str = "code_observed"  # user_input, code_observed, code_ast, git_commit, test_result, audit_log, external_doc, agent_inference, derived_link
     source_refs: list[str] = field(default_factory=list)
     contains_redactions: bool = False
-    verified_at: str = field(default_factory=now_iso)
+    digest: str = ""
+    observed_commit: str = ""
+    producer: str = ""
+    verification_state: str = "unverified"  # verified, unverified, possibly_stale, stale, contradicted
+    verified_at: str = ""
+    created_at: str = field(default_factory=now_iso)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {k: v for k, v in asdict(self).items() if v not in ("", None, [], {})}
+
+    @property
+    def source_ref(self) -> str:
+        return self.source_refs[0] if self.source_refs else ""
 
     @classmethod
     def from_dict(cls, data: Any) -> "EvidenceStatement":
@@ -73,13 +136,23 @@ class EvidenceStatement:
             return cls(statement=data)
         if not isinstance(data, dict):
             return cls(statement="Not supplied.")
+
+        refs = list(data.get("source_refs", []))
+        if not refs and data.get("source_ref"):
+            refs = [data["source_ref"]]
+
         return cls(
-            statement=data.get("statement", ""),
-            authority_level=int(data.get("authority_level", 70)),
+            statement=data.get("statement", "Not supplied."),
+            authority_level=int(data.get("authority_level", 0)),
             source_type=data.get("source_type", "code_observed"),
-            source_refs=list(data.get("source_refs", [])),
+            source_refs=refs,
             contains_redactions=bool(data.get("contains_redactions", False)),
-            verified_at=data.get("verified_at", now_iso()),
+            digest=data.get("digest", ""),
+            observed_commit=data.get("observed_commit", ""),
+            producer=data.get("producer", ""),
+            verification_state=data.get("verification_state", "unverified"),
+            verified_at=data.get("verified_at", ""),
+            created_at=data.get("created_at", now_iso()),
         )
 
 
@@ -87,10 +160,10 @@ class EvidenceStatement:
 class KnowledgeRecord:
     """Canonical model for all durable knowledge records in .brain/."""
     id: str
-    kind: str  # decision, requirement, technical, question, traceability, concept
+    kind: str  # decision, requirement, technical, question, traceability, concept, policy, invariant
     title: str
     status: str  # accepted, observed, open, linked, deprecated, superseded, rejected
-    authority: str  # user_explicit, code_observed, derived_link, unresolved, agent_inference, external_source
+    authority: str  # user_explicit, policy_mandate, code_observed, derived_link, unresolved, agent_inference, external_source
     updated: str = field(default_factory=today)
     body: str = ""
     evidence: EvidenceStatement = field(default_factory=lambda: EvidenceStatement(statement="Not supplied."))
@@ -104,6 +177,7 @@ class KnowledgeRecord:
     superseded_by: str = ""
     freshness: str = "fresh"  # fresh, possibly_stale, stale, contradicted, unverified
     path: str = ""  # Relative to .brain/
+    extra_frontmatter: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         res = asdict(self)
@@ -116,20 +190,127 @@ class KnowledgeRecord:
         fm_lines = [
             "---",
             f"id: {self.id}",
+            f"kind: {self.kind}",
             f"status: {self.status}",
             f"authority: {self.authority}",
-            f"updated: {self.updated}",
+            f"updated: {self.updated or today()}",
         ]
+        if self.created_at:
+            fm_lines.append(f"created_at: {self.created_at}")
+        if self.confidence < 1.0:
+            fm_lines.append(f"confidence: {self.confidence}")
         if self.supersedes:
             fm_lines.append(f"supersedes: {self.supersedes}")
         if self.superseded_by:
             fm_lines.append(f"superseded_by: {self.superseded_by}")
-        if self.freshness != "fresh":
+        if self.freshness and self.freshness != "fresh":
             fm_lines.append(f"freshness: {self.freshness}")
-        if self.identity.agent_id:
-            fm_lines.append(f"agent_id: {self.identity.agent_id}")
-        if self.identity.commit_sha:
-            fm_lines.append(f"commit_sha: {self.identity.commit_sha}")
+
+        # Provenance / Identity fields
+        ident = self.identity
+        if ident.schema_version:
+            fm_lines.append(f"schema_version: {ident.schema_version}")
+        if ident.project_id:
+            fm_lines.append(f"project_id: {ident.project_id}")
+        if ident.repository:
+            fm_lines.append(f"repository: {ident.repository}")
+        if ident.commit_sha:
+            fm_lines.append(f"commit_sha: {ident.commit_sha}")
+        if ident.branch:
+            fm_lines.append(f"branch: {ident.branch}")
+        if ident.worktree:
+            fm_lines.append(f"worktree: {ident.worktree}")
+        if ident.team_id:
+            fm_lines.append(f"team_id: {ident.team_id}")
+        if ident.agent_id:
+            fm_lines.append(f"agent_id: {ident.agent_id}")
+        if ident.agent_role:
+            fm_lines.append(f"agent_role: {ident.agent_role}")
+        if ident.session_id:
+            fm_lines.append(f"session_id: {ident.session_id}")
+        if ident.conversation_id:
+            fm_lines.append(f"conversation_id: {ident.conversation_id}")
+        if ident.task_id:
+            fm_lines.append(f"task_id: {ident.task_id}")
+        if ident.checkpoint_id:
+            fm_lines.append(f"checkpoint_id: {ident.checkpoint_id}")
+        if ident.producer:
+            fm_lines.append(f"producer: {ident.producer}")
+        if ident.producer_type:
+            fm_lines.append(f"producer_type: {ident.producer_type}")
+        if ident.producer_id:
+            fm_lines.append(f"producer_id: {ident.producer_id}")
+        if ident.producer_version:
+            fm_lines.append(f"producer_version: {ident.producer_version}")
+        if ident.reviewer:
+            fm_lines.append(f"reviewer: {ident.reviewer}")
+        if ident.harness:
+            fm_lines.append(f"harness: {ident.harness}")
+        if ident.model_provider:
+            fm_lines.append(f"model_provider: {ident.model_provider}")
+        if ident.model_id:
+            fm_lines.append(f"model_id: {ident.model_id}")
+        if ident.authority_domain:
+            fm_lines.append(f"authority_domain: {ident.authority_domain}")
+        if ident.authority_level:
+            fm_lines.append(f"authority_level: {ident.authority_level}")
+        if ident.observed_at:
+            fm_lines.append(f"observed_at: {ident.observed_at}")
+
+        # Evidence fields
+        ev = self.evidence
+        if ev.source_type:
+            fm_lines.append(f"evidence_source_type: {ev.source_type}")
+        if ev.observed_commit:
+            fm_lines.append(f"evidence_observed_commit: {ev.observed_commit}")
+        if ev.digest:
+            fm_lines.append(f"evidence_digest: {ev.digest}")
+        if ev.producer:
+            fm_lines.append(f"evidence_producer: {ev.producer}")
+        if ev.verification_state:
+            fm_lines.append(f"evidence_verification_state: {ev.verification_state}")
+        if ev.verified_at:
+            fm_lines.append(f"evidence_verified_at: {ev.verified_at}")
+        if ev.source_refs:
+            fm_lines.append("evidence_source_refs:")
+            for sref in ev.source_refs:
+                fm_lines.append(f"  - {sref}")
+
+        # Structured lists: scope, affected_symbols, affected_tests
+        if self.scope:
+            fm_lines.append("scope:")
+            for sc in self.scope:
+                fm_lines.append(f"  - {sc}")
+        if self.affected_symbols:
+            fm_lines.append("affected_symbols:")
+            for sym in self.affected_symbols:
+                fm_lines.append(f"  - {sym}")
+        if self.affected_tests:
+            fm_lines.append("affected_tests:")
+            for tst in self.affected_tests:
+                fm_lines.append(f"  - {tst}")
+
+        # Any extra frontmatter from previous versions/extensions
+        known_keys = {
+            "id", "kind", "status", "authority", "updated", "created_at", "confidence",
+            "supersedes", "superseded_by", "freshness", "schema_version", "project_id",
+            "repository", "commit_sha", "branch", "worktree", "team_id", "agent_id",
+            "agent_role", "session_id", "conversation_id", "task_id", "checkpoint_id",
+            "producer", "producer_type", "producer_id", "producer_version", "reviewer",
+            "harness", "model_provider", "model_id", "authority_domain", "authority_level",
+            "observed_at", "evidence_source_type", "evidence_observed_commit",
+            "evidence_digest", "evidence_producer", "evidence_verification_state",
+            "evidence_verified_at", "evidence_source_refs", "scope", "affected_symbols", "affected_tests"
+        }
+        for k, v in sorted(self.extra_frontmatter.items()):
+            if k not in known_keys:
+                if isinstance(v, list):
+                    fm_lines.append(f"{k}:")
+                    for item in v:
+                        fm_lines.append(f"  - {item}")
+                else:
+                    fm_lines.append(f"{k}: {v}")
+
         fm_lines.append("---")
         fm_lines.append("")
         fm_lines.append(f"# {self.title}")
@@ -142,6 +323,8 @@ class KnowledgeRecord:
             "question": "Question",
             "concept": "Summary",
             "traceability": "Source record",
+            "policy": "Policy",
+            "invariant": "Invariant",
         }
         section_title = heading_map.get(self.kind, "Content")
         fm_lines.append(f"## {section_title}")
@@ -201,7 +384,7 @@ class CandidateRecord:
 
 @dataclass
 class TraceabilityLink:
-    """Link connecting intent (REQ/ADR) to implementation symbols and test suites."""
+    """Link connecting intent (REQ/ADR/POL) to implementation symbols and test suites."""
     id: str
     source_id: str
     title: str
@@ -212,6 +395,14 @@ class TraceabilityLink:
     authority: str = "derived_link"
     updated: str = field(default_factory=today)
     freshness: str = "fresh"
+    edge_type: str = "IMPLEMENTS"  # SATISFIES, IMPLEMENTS, VERIFIES_WITH, OBSERVES, AFFECTS_SYMBOL
+    target_ref: str = ""
+    producer: str = ""
+    provider: str = ""
+    observed_commit_sha: str = ""
+    verification_state: str = "unverified"
+    confidence: float = 1.0
+    last_verified_at: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -224,15 +415,66 @@ class ContextPack:
     compiled_at: str = field(default_factory=now_iso)
     total_chars: int = 0
     estimated_tokens: int = 0
-    budget_chars: int = 4000
+    budget_chars: int = Budgets.CONTEXT_PACK_CHARS
     authoritative_intent: list[dict[str, Any]] = field(default_factory=list)
     current_implementation: list[dict[str, Any]] = field(default_factory=list)
     past_experience: list[dict[str, Any]] = field(default_factory=list)
     open_questions: list[dict[str, Any]] = field(default_factory=list)
     conflicts_and_staleness: list[dict[str, Any]] = field(default_factory=list)
     next_reading: list[str] = field(default_factory=list)
+    provider_diagnostics: list[Any] = field(default_factory=list)
 
-    provider_diagnostics: list[str] = field(default_factory=list)
+    def to_dict(self) -> dict[str, Any]:
+        """Produce canonical JSON matching context-pack.schema.json while keeping backward compatibility."""
+        diag_summaries = []
+        for d in self.provider_diagnostics:
+            if isinstance(d, dict):
+                diag_summaries.append(d.get("diagnostic_message") or d.get("diagnostic") or str(d))
+            else:
+                diag_summaries.append(str(d))
+
+        return {
+            "task": self.task,
+            "compiled_at": self.compiled_at,
+            "total_chars": self.total_chars,
+            "estimated_tokens": self.estimated_tokens,
+            "budget_chars": self.budget_chars,
+            "sections": {
+                "authoritative_intent": self.authoritative_intent,
+                "current_implementation": self.current_implementation,
+                "past_experience": self.past_experience,
+                "open_questions": self.open_questions,
+                "conflicts_and_staleness": self.conflicts_and_staleness,
+                "next_reading": self.next_reading,
+                "provider_diagnostics": diag_summaries,
+            },
+            # Top-level mirrors for legacy callers
+            "authoritative_intent": self.authoritative_intent,
+            "current_implementation": self.current_implementation,
+            "past_experience": self.past_experience,
+            "open_questions": self.open_questions,
+            "conflicts_and_staleness": self.conflicts_and_staleness,
+            "next_reading": self.next_reading,
+            "provider_diagnostics": diag_summaries,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ContextPack":
+        sec = data.get("sections", {})
+        return cls(
+            task=data.get("task", ""),
+            compiled_at=data.get("compiled_at", now_iso()),
+            total_chars=int(data.get("total_chars", 0)),
+            estimated_tokens=int(data.get("estimated_tokens", 0)),
+            budget_chars=int(data.get("budget_chars", Budgets.CONTEXT_PACK_CHARS)),
+            authoritative_intent=sec.get("authoritative_intent") or data.get("authoritative_intent", []),
+            current_implementation=sec.get("current_implementation") or data.get("current_implementation", []),
+            past_experience=sec.get("past_experience") or data.get("past_experience", []),
+            open_questions=sec.get("open_questions") or data.get("open_questions", []),
+            conflicts_and_staleness=sec.get("conflicts_and_staleness") or data.get("conflicts_and_staleness", []),
+            next_reading=sec.get("next_reading") or data.get("next_reading", []),
+            provider_diagnostics=sec.get("provider_diagnostics") or data.get("provider_diagnostics", []),
+        )
 
     def to_text(self) -> str:
         """Render into human and agent-readable Markdown context pack."""
@@ -244,7 +486,8 @@ class ContextPack:
         if self.provider_diagnostics:
             lines.append("## Provider Health & Intelligence Sources")
             for diag in self.provider_diagnostics:
-                lines.append(f"- ℹ️ {diag}")
+                msg = diag.get("diagnostic_message") or diag.get("diagnostic") if isinstance(diag, dict) else str(diag)
+                lines.append(f"- ℹ️ {msg}")
             lines.append("")
 
         if self.authoritative_intent:
@@ -288,3 +531,10 @@ class ContextPack:
         lines.append("")
 
         return "\n".join(lines)
+
+    def to_markdown(self) -> str:
+        return self.to_text()
+
+    def render_markdown(self) -> str:
+        return self.to_text()
+

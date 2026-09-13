@@ -74,32 +74,34 @@ def stage_candidate(
     redacted: bool,
     identity: IdentityEnvelope | None = None,
 ) -> str:
-    """Stage a candidate in .brain/.state/pending/. Does NOT mutate canonical memory."""
+    """Stage a candidate in .brain/.state/pending/ under lock. Does NOT mutate canonical memory."""
+    from context_forge.store.lock import repo_lock
     cid = compute_candidate_id(session, delta)
-    p["pending"].mkdir(parents=True, exist_ok=True)
-    target = candidate_file(p["pending"], cid)
+    with repo_lock(p):
+        p["pending"].mkdir(parents=True, exist_ok=True)
+        target = candidate_file(p["pending"], cid)
 
-    if target.exists():
-        existing = read_json(target, {})
-        events = existing.get("events", []) if isinstance(existing, dict) else []
-        if event not in events:
-            existing["events"] = events + [event]
-            atomic_write(target, json.dumps(existing, indent=2, sort_keys=True) + "\n")
+        if target.exists():
+            existing = read_json(target, {})
+            events = existing.get("events", []) if isinstance(existing, dict) else []
+            if event not in events:
+                existing["events"] = events + [event]
+                atomic_write(target, json.dumps(existing, indent=2, sort_keys=True) + "\n")
+            return cid
+
+        record = CandidateRecord(
+            id=cid,
+            status="pending",
+            captured_at=now_iso(),
+            events=[event],
+            session=session,
+            source="deterministic",
+            contains_redactions=redacted,
+            delta=delta,
+            identity=identity or IdentityEnvelope(),
+        )
+        atomic_write(target, json.dumps(record.to_dict(), indent=2, sort_keys=True) + "\n")
         return cid
-
-    record = CandidateRecord(
-        id=cid,
-        status="pending",
-        captured_at=now_iso(),
-        events=[event],
-        session=session,
-        source="deterministic",
-        contains_redactions=redacted,
-        delta=delta,
-        identity=identity or IdentityEnvelope(),
-    )
-    atomic_write(target, json.dumps(record.to_dict(), indent=2, sort_keys=True) + "\n")
-    return cid
 
 
 def pending_candidates(p: dict[str, Path]) -> list[dict[str, Any]]:

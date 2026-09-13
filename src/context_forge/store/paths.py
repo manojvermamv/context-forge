@@ -36,6 +36,7 @@ def brain_paths(repo: Path) -> dict[str, Path]:
         "concepts": b / "concepts",
         "requirements": b / "requirements",
         "technical": b / "technical",
+        "policies": b / "policies",
         "traceability": b / "traceability",
         "questions": b / "questions",
         "audit": b / "audit",
@@ -69,6 +70,6 @@ def read_json(path: Path, default: Any = None) -> Any:
 
 def atomic_write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + f".tmp{os.getpid()}")
+    tmp = path.with_suffix(path.suffix + f".tmp{os.getpid()}_{os.urandom(4).hex()}")
     tmp.write_text(text, encoding="utf-8")
     tmp.replace(path)

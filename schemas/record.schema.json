@@ -8,15 +8,24 @@
   "properties": {
     "id": {
       "type": "string",
-      "pattern": "^(ADR|REQ|TECH|Q|TRACE|CONCEPT)-[A-Za-z0-9_-]+$"
+      "pattern": "^(ADR|REQ|TECH|Q|TRACE|CONCEPT|POL|INV)-[A-Za-z0-9_-]+$"
     },
     "kind": {
       "type": "string",
-      "enum": ["decision", "requirement", "technical", "question", "traceability", "concept"]
+      "enum": [
+        "decision",
+        "requirement",
+        "technical",
+        "question",
+        "traceability",
+        "concept",
+        "policy",
+        "invariant"
+      ]
     },
     "title": {
       "type": "string",
-      "minLength": 3
+      "minLength": 1
     },
     "status": {
       "type": "string",
@@ -26,6 +35,7 @@
       "type": "string",
       "enum": [
         "user_explicit",
+        "policy_mandate",
         "code_observed",
         "derived_link",
         "unresolved",
@@ -40,8 +50,7 @@
       "default": 1.0
     },
     "created_at": {
-      "type": "string",
-      "format": "date-time"
+      "type": "string"
     },
     "updated": {
       "type": "string"
@@ -77,6 +86,12 @@
     },
     "body": {
       "type": "string"
+    },
+    "path": {
+      "type": "string"
+    },
+    "extra_frontmatter": {
+      "type": "object"
     }
   }
 }

@@ -69,40 +69,42 @@ def approved_log_entry(candidate: dict) -> str:
 
 def approve_candidate(repo: Path, candidate_id: str) -> int:
     """Promote exactly one reviewed candidate from .brain/.state/pending into canonical memory."""
+    from context_forge.store.lock import repo_lock
     p = brain_paths(repo)
-    try:
-        pending_path = candidate_file(p["pending"], candidate_id)
-        approved_path = candidate_file(p["approved"], candidate_id)
-    except ValueError as exc:
-        print(f"[brain] approval rejected: {exc}")
-        return 1
+    with repo_lock(p):
+        try:
+            pending_path = candidate_file(p["pending"], candidate_id)
+            approved_path = candidate_file(p["approved"], candidate_id)
+        except ValueError as exc:
+            print(f"[brain] approval rejected: {exc}")
+            return 1
 
-    if not pending_path.exists():
-        if approved_path.exists():
-            print(f"[brain] candidate {candidate_id} was already approved; no duplicate promotion occurred")
-        else:
-            print(f"[brain] pending candidate {candidate_id} was not found")
-        return 1
+        if not pending_path.exists():
+            if approved_path.exists():
+                print(f"[brain] candidate {candidate_id} was already approved; no duplicate promotion occurred")
+            else:
+                print(f"[brain] pending candidate {candidate_id} was not found")
+            return 1
 
-    candidate = read_json(pending_path, {})
-    problem = validate_pending_candidate(candidate, candidate_id)
-    if problem:
-        print(f"[brain] approval rejected: {problem}")
-        return 1
+        candidate = read_json(pending_path, {})
+        problem = validate_pending_candidate(candidate, candidate_id)
+        if problem:
+            print(f"[brain] approval rejected: {problem}")
+            return 1
 
-    marker = f"candidate:{candidate_id}"
-    log_text = read_text(p["log"])
-    if marker not in log_text:
-        atomic_write(p["log"], log_text + approved_log_entry(candidate))
-    refresh_current_state(p, candidate["delta"])
+        marker = f"candidate:{candidate_id}"
+        log_text = read_text(p["log"])
+        if marker not in log_text:
+            atomic_write(p["log"], log_text + approved_log_entry(candidate))
+        refresh_current_state(p, candidate["delta"])
 
-    sync_routing_index(p)
-    write_registry(repo, p)
+        sync_routing_index(p)
+        write_registry(repo, p)
 
-    candidate["status"] = "approved"
-    candidate["approved_at"] = now_iso()
-    p["approved"].mkdir(parents=True, exist_ok=True)
-    atomic_write(approved_path, json.dumps(candidate, indent=2, sort_keys=True) + "\n")
-    pending_path.unlink(missing_ok=True)
-    print(f"[brain] approved candidate {candidate_id}; canonical hot memory and index refreshed")
-    return 0
+        candidate["status"] = "approved"
+        candidate["approved_at"] = now_iso()
+        p["approved"].mkdir(parents=True, exist_ok=True)
+        atomic_write(approved_path, json.dumps(candidate, indent=2, sort_keys=True) + "\n")
+        pending_path.unlink(missing_ok=True)
+        print(f"[brain] approved candidate {candidate_id}; canonical hot memory and index refreshed")
+        return 0

@@ -1,0 +1,149 @@
+import json
+import os
+import shutil
+import stat
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+_SRC = Path(__file__).resolve().parent.parent / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
+from context_forge.providers.base import ProviderStatus
+from context_forge.providers.code.cbm import CodebaseMemoryMCPProvider, normalize_repo_path
+
+
+class TestCBMContract(unittest.TestCase):
+    def test_binary_missing(self) -> None:
+        cbm = CodebaseMemoryMCPProvider(executable_path="/nonexistent/path/to/cbm")
+        self.assertFalse(cbm.is_available())
+        res = cbm.check_health()
+        self.assertEqual(res.status, ProviderStatus.UNAVAILABLE)
+        self.assertEqual(res.diagnostic_code, "CBM_BINARY_NOT_FOUND")
+
+    def test_mock_cbm_full_contract_flow(self) -> None:
+        """Verify list_projects -> project resolution -> search_graph with project identity."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            repo_dir = tmp_dir / "my_project"
+            repo_dir.mkdir()
+
+            # Create mock CBM executable
+            runner = tmp_dir / "cbm_runner.py"
+            runner.write_text(
+                'import sys, json\n'
+                'if "--version" in sys.argv:\n'
+                '    print("0.10.8")\n'
+                'elif len(sys.argv) >= 3 and sys.argv[1] == "cli":\n'
+                '    tool = sys.argv[2]\n'
+                '    args = json.loads(sys.argv[3]) if len(sys.argv) > 3 else {}\n'
+                '    if tool == "list_projects":\n'
+                f'        print(json.dumps([{{\n'
+                f'            "name": "my-project-id",\n'
+                f'            "root_path": "{str(repo_dir.resolve()).replace(chr(92), "/")}",\n'
+                f'        }}]))\n'
+                '    elif tool == "search_graph":\n'
+                '        assert args.get("project") == "my-project-id", "project arg required"\n'
+                '        print(json.dumps([{"name": "AuthService", "path": "src/auth.py", "signature": "class AuthService"}]))\n'
+                '    elif tool == "index_repository":\n'
+                '        print(json.dumps({"status": "indexed"}))\n'
+                '    else:\n'
+                '        print(json.dumps([]))\n',
+                encoding="utf-8",
+            )
+
+            if sys.platform == "win32":
+                mock_exe = tmp_dir / "mock_cbm.bat"
+                mock_exe.write_text(f'@echo off\n"{sys.executable}" "{runner}" %*\n', encoding="utf-8")
+            else:
+                mock_exe = tmp_dir / "mock_cbm"
+                mock_exe.write_text(f'#!/bin/sh\n"{sys.executable}" "{runner}" "$@"\n', encoding="utf-8")
+                mock_exe.chmod(mock_exe.stat().st_mode | stat.S_IEXEC)
+
+            cbm = CodebaseMemoryMCPProvider(executable_path=str(mock_exe))
+
+            # Health
+            health = cbm.check_health()
+            self.assertEqual(health.status, ProviderStatus.OK)
+            self.assertEqual(health.version, "0.10.8")
+
+            # Resolve project
+            proj_name, err = cbm.resolve_project(repo_dir)
+            self.assertIsNone(err)
+            self.assertEqual(proj_name, "my-project-id")
+
+            # Query impact passing target repo
+            impact_res = cbm.query_impact_result("AuthService", [str(repo_dir)])
+            self.assertEqual(impact_res.status, ProviderStatus.OK)
+            self.assertEqual(impact_res.project_name, "my-project-id")
+            self.assertEqual(len(impact_res.data), 1)
+            self.assertEqual(impact_res.data[0]["symbol"], "AuthService")
+
+    def test_unindexed_repo_returns_unindexed_status(self) -> None:
+        """Verify unindexed repo returns UNINDEXED without crashing."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            repo_dir = tmp_dir / "unindexed_project"
+            repo_dir.mkdir()
+
+            runner = tmp_dir / "cbm_runner.py"
+            runner.write_text(
+                'import sys, json\n'
+                'if "--version" in sys.argv:\n'
+                '    print("0.10.8")\n'
+                'elif len(sys.argv) >= 3 and sys.argv[1] == "cli":\n'
+                '    print(json.dumps([]))\n',  # Empty projects
+                encoding="utf-8",
+            )
+
+            if sys.platform == "win32":
+                mock_exe = tmp_dir / "mock_cbm.bat"
+                mock_exe.write_text(f'@echo off\n"{sys.executable}" "{runner}" %*\n', encoding="utf-8")
+            else:
+                mock_exe = tmp_dir / "mock_cbm"
+                mock_exe.write_text(f'#!/bin/sh\n"{sys.executable}" "{runner}" "$@"\n', encoding="utf-8")
+                mock_exe.chmod(mock_exe.stat().st_mode | stat.S_IEXEC)
+
+            cbm = CodebaseMemoryMCPProvider(executable_path=str(mock_exe), auto_index=False)
+            proj_name, err = cbm.resolve_project(repo_dir)
+            self.assertIsNone(proj_name)
+            self.assertIsNotNone(err)
+            self.assertEqual(err.status, ProviderStatus.UNINDEXED)
+
+    def test_tool_nonzero_exit_returns_error(self) -> None:
+        """Verify tool crash surfaces as ProviderStatus.ERROR."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            runner = tmp_dir / "cbm_runner.py"
+            runner.write_text('import sys\nsys.stderr.write("Fatal crash\\n")\nsys.exit(2)\n', encoding="utf-8")
+
+            if sys.platform == "win32":
+                mock_exe = tmp_dir / "mock_cbm.bat"
+                mock_exe.write_text(f'@echo off\n"{sys.executable}" "{runner}" %*\n', encoding="utf-8")
+            else:
+                mock_exe = tmp_dir / "mock_cbm"
+                mock_exe.write_text(f'#!/bin/sh\n"{sys.executable}" "{runner}" "$@"\n', encoding="utf-8")
+                mock_exe.chmod(mock_exe.stat().st_mode | stat.S_IEXEC)
+
+            cbm = CodebaseMemoryMCPProvider(executable_path=str(mock_exe))
+            res = cbm.run_tool("list_projects", {})
+            self.assertEqual(res.status, ProviderStatus.ERROR)
+            self.assertIn("Fatal crash", res.diagnostic)
+
+    def test_live_cbm_provider_opt_in(self) -> None:
+        """Opt-in live CBM integration test (RUN_CBM_LIVE_TESTS=1)."""
+        if os.environ.get("RUN_CBM_LIVE_TESTS") != "1":
+            self.skipTest("Live CBM tests not enabled. Set RUN_CBM_LIVE_TESTS=1 to run.")
+
+        cbm = CodebaseMemoryMCPProvider()
+        health = cbm.check_health()
+        if not health.is_ok():
+            self.skipTest(f"Live CBM binary not available or healthy: {health.diagnostic}")
+
+        self.assertTrue(health.version != "", "Live CBM must report a version")
+
+
+if __name__ == "__main__":
+    unittest.main()

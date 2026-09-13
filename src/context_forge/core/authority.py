@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass, field
 from enum import Enum, IntEnum
 from typing import Any, Optional
 
@@ -13,13 +15,18 @@ class AuthorityDomain(str, Enum):
 
 
 class ResolutionDisposition(str, Enum):
-    """Classification of cross-plane contradictions."""
+    """Classification of cross-plane and intra-plane claim comparisons."""
+    AGREES = "AGREES"                       # Claims are consistent or mutually supportive
     ADVICE_REJECTED = "ADVICE_REJECTED"     # Intent/Policy dictates; Experience memory is subordinate advice
-    DRIFT = "DRIFT"                         # Code implementation violates stated Intent/Policy (active drift alert)
-    RECORD_STALE = "RECORD_STALE"           # Fresh code truth contradicts older recorded technical fact
-    SUPERSEDED = "SUPERSEDED"               # Newer authoritative ADR supersedes older ADR
     USER_OVERRIDE = "USER_OVERRIDE"         # Current direct user instruction supersedes past decisions
+    DRIFT = "DRIFT"                         # Code implementation diverges from stated Intent
+    VIOLATION = "VIOLATION"                 # Code implementation breaches mandatory Policy/Invariant
+    RECORD_STALE = "RECORD_STALE"           # Fresh code truth contradicts older recorded technical fact
+    SUPERSEDED = "SUPERSEDED"               # Newer authoritative record formally replaces older record
+    CONTRADICTED = "CONTRADICTED"           # Conflicting claims within same domain without clear precedence
     EVIDENCE_MISMATCH = "EVIDENCE_MISMATCH" # Test/Runtime verification refutes technical claim
+    UNRESOLVED = "UNRESOLVED"               # Incomplete or ambiguous claims requiring reconciliation
+    INCOMPARABLE = "INCOMPARABLE"           # Non-overlapping scopes or orthogonal domains
 
 
 class AuthorityLevel(IntEnum):
@@ -49,6 +56,33 @@ AUTHORITY_MAP = {
 }
 
 
+@dataclass
+class AuthorityResolution:
+    """Structured resolution of pairwise authority interactions."""
+    disposition: ResolutionDisposition
+    domain_a: AuthorityDomain
+    domain_b: AuthorityDomain
+    claims_conflict: bool
+    winner: Optional[str] = None
+    preserved_claims: list[dict[str, Any]] = field(default_factory=list)
+    reason: str = ""
+    evidence: str = ""
+    reconciliation_required: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "disposition": self.disposition.value,
+            "domain_a": self.domain_a.value,
+            "domain_b": self.domain_b.value,
+            "claims_conflict": self.claims_conflict,
+            "winner": self.winner,
+            "preserved_claims": self.preserved_claims,
+            "reason": self.reason,
+            "evidence": self.evidence,
+            "reconciliation_required": self.reconciliation_required,
+        }
+
+
 class EpistemicAuthority:
     """Validator for authority transitions, promotions, and conflicts."""
 
@@ -57,10 +91,29 @@ class EpistemicAuthority:
         return AUTHORITY_MAP.get(authority_name, AuthorityLevel.UNRESOLVED)
 
     @staticmethod
-    def get_domain(kind: str = "", authority: str = "") -> AuthorityDomain:
-        """Derive typed authority domain from record kind and authority."""
+    def get_domain(kind: str = "", authority: str = "", item: Optional[dict[str, Any]] = None) -> AuthorityDomain:
+        """Derive typed authority domain from record kind, authority, or claim dictionary."""
         k = kind.lower()
         a = authority.lower()
+        if item:
+            item_id = str(item.get("id", "")).upper()
+            if not k:
+                if item_id.startswith(("ADR", "REQ", "GOAL", "USER")):
+                    k = "decision"
+                elif item_id.startswith(("POL", "INV")):
+                    k = "policy"
+                elif item_id.startswith(("TECH", "TRACE", "SYM")):
+                    k = "technical"
+            if not a:
+                if item.get("source") == "agentmemory" or "finding" in item or "lesson" in item or item_id.startswith("MEM"):
+                    a = "procedural_memory"
+                elif "symbol" in item or "details" in item or "is_live" in item:
+                    a = "code_observed"
+                elif k in ("decision", "requirement"):
+                    a = "user_explicit"
+                elif k in ("policy", "invariant"):
+                    a = "policy_mandate"
+
         if k in ("decision", "requirement", "goal") or a in ("user_explicit",):
             return AuthorityDomain.INTENT
         if k in ("policy", "security", "invariant") or a in ("policy_mandate",):
@@ -79,6 +132,11 @@ class EpistemicAuthority:
                 return False, f"{kind} requires --authority user_explicit. Code or agent inference is not intent."
             if not accept:
                 return False, f"{kind} requires explicit acceptance (--accept). Store ambiguity as a question instead."
+        elif kind in ("policy", "invariant"):
+            if authority not in ("policy_mandate", "user_explicit"):
+                return False, f"{kind} requires --authority policy_mandate or user_explicit"
+            if not accept:
+                return False, f"{kind} requires explicit acceptance (--accept)"
         elif kind == "technical":
             if authority != "code_observed":
                 return False, "technical records must use --authority code_observed"
@@ -106,28 +164,203 @@ class EpistemicAuthority:
         level_a: int = 0,
         level_b: int = 0,
     ) -> ResolutionDisposition:
-        """Determine correct disposition for cross-domain interactions."""
-        # 1. Intent/Policy vs Experience: Intent rules, experience is subordinate advice
+        """Determine default potential disposition from domain interaction alone."""
         if (domain_a in (AuthorityDomain.INTENT, AuthorityDomain.POLICY) and domain_b == AuthorityDomain.EXPERIENCE):
             return ResolutionDisposition.ADVICE_REJECTED
         if (domain_b in (AuthorityDomain.INTENT, AuthorityDomain.POLICY) and domain_a == AuthorityDomain.EXPERIENCE):
             return ResolutionDisposition.ADVICE_REJECTED
 
-        # 2. Intent/Policy vs Implementation: DRIFT / VIOLATION
-        # Code does NOT change intent, and intent does NOT hide reality
-        if (domain_a in (AuthorityDomain.INTENT, AuthorityDomain.POLICY) and domain_b == AuthorityDomain.IMPLEMENTATION):
+        if domain_a == AuthorityDomain.POLICY and domain_b == AuthorityDomain.IMPLEMENTATION:
+            return ResolutionDisposition.VIOLATION
+        if domain_b == AuthorityDomain.POLICY and domain_a == AuthorityDomain.IMPLEMENTATION:
+            return ResolutionDisposition.VIOLATION
+
+        if domain_a == AuthorityDomain.INTENT and domain_b == AuthorityDomain.IMPLEMENTATION:
             return ResolutionDisposition.DRIFT
-        if (domain_b in (AuthorityDomain.INTENT, AuthorityDomain.POLICY) and domain_a == AuthorityDomain.IMPLEMENTATION):
+        if domain_b == AuthorityDomain.INTENT and domain_a == AuthorityDomain.IMPLEMENTATION:
             return ResolutionDisposition.DRIFT
 
-        # 3. Implementation vs Implementation (e.g. fresh code truth vs old technical record)
         if domain_a == AuthorityDomain.IMPLEMENTATION and domain_b == AuthorityDomain.IMPLEMENTATION:
-            return ResolutionDisposition.RECORD_STALE
+            return ResolutionDisposition.AGREES
 
-        # 4. Intent vs Intent (e.g. superseding ADR or user explicit instruction)
-        if domain_a == AuthorityDomain.INTENT and domain_b == AuthorityDomain.INTENT:
-            if level_a > level_b:
-                return ResolutionDisposition.USER_OVERRIDE if level_a >= AuthorityLevel.USER_EXPLICIT_CURRENT else ResolutionDisposition.SUPERSEDED
-            return ResolutionDisposition.SUPERSEDED
+        if domain_a in (AuthorityDomain.INTENT, AuthorityDomain.POLICY) and domain_b in (AuthorityDomain.INTENT, AuthorityDomain.POLICY):
+            if level_a >= AuthorityLevel.USER_EXPLICIT_CURRENT and level_a > level_b:
+                return ResolutionDisposition.USER_OVERRIDE
+            if level_b >= AuthorityLevel.USER_EXPLICIT_CURRENT and level_b > level_a:
+                return ResolutionDisposition.USER_OVERRIDE
+            return ResolutionDisposition.AGREES
 
-        return ResolutionDisposition.ADVICE_REJECTED
+        return ResolutionDisposition.AGREES
+
+    @classmethod
+    def resolve_claims(
+        cls,
+        claim_a: dict[str, Any],
+        claim_b: dict[str, Any],
+    ) -> AuthorityResolution:
+        """Perform robust pairwise resolution separating claim comparison from domain relationship."""
+        domain_a = cls.get_domain(claim_a.get("kind", ""), claim_a.get("authority", ""), claim_a)
+        domain_b = cls.get_domain(claim_b.get("kind", ""), claim_b.get("authority", ""), claim_b)
+        lvl_a = int(claim_a.get("authority_level") or cls.get_level(claim_a.get("authority", "")))
+        lvl_b = int(claim_b.get("authority_level") or cls.get_level(claim_b.get("authority", "")))
+
+        scopes_a = set(claim_a.get("scope") or ([claim_a["path"]] if "path" in claim_a else []))
+        scopes_b = set(claim_b.get("scope") or ([claim_b["path"]] if "path" in claim_b else []))
+        symbols_a = set(claim_a.get("symbols") or ([claim_a["symbol"]] if "symbol" in claim_a else []))
+        symbols_b = set(claim_b.get("symbols") or ([claim_b["symbol"]] if "symbol" in claim_b else []))
+
+        text_a = (claim_a.get("body", "") + " " + claim_a.get("title", "") + " " + claim_a.get("details", "") + " " + claim_a.get("finding", "")).lower()
+        text_b = (claim_b.get("body", "") + " " + claim_b.get("title", "") + " " + claim_b.get("details", "") + " " + claim_b.get("finding", "")).lower()
+
+        # Check scope overlap
+        has_scope_overlap = bool((scopes_a and scopes_b and (scopes_a & scopes_b)) or (symbols_a and symbols_b and (symbols_a & symbols_b)))
+
+        # 1. INTENT / POLICY vs EXPERIENCE
+        if (domain_a in (AuthorityDomain.INTENT, AuthorityDomain.POLICY) and domain_b == AuthorityDomain.EXPERIENCE) or \
+           (domain_b in (AuthorityDomain.INTENT, AuthorityDomain.POLICY) and domain_a == AuthorityDomain.EXPERIENCE):
+            intent_item = claim_a if domain_a in (AuthorityDomain.INTENT, AuthorityDomain.POLICY) else claim_b
+            exp_item = claim_b if intent_item is claim_a else claim_a
+
+            return AuthorityResolution(
+                disposition=ResolutionDisposition.ADVICE_REJECTED,
+                domain_a=domain_a,
+                domain_b=domain_b,
+                claims_conflict=True,
+                winner=intent_item.get("id"),
+                preserved_claims=[intent_item],
+                reason=f"Authoritative {intent_item.get('id')} dictates intent; experiential memory is subordinate advice.",
+                evidence="Intent subordinates experiential finding.",
+                reconciliation_required=False,
+            )
+
+        # 2. INTENT / POLICY vs IMPLEMENTATION
+        if (domain_a in (AuthorityDomain.INTENT, AuthorityDomain.POLICY) and domain_b == AuthorityDomain.IMPLEMENTATION) or \
+           (domain_b in (AuthorityDomain.INTENT, AuthorityDomain.POLICY) and domain_a == AuthorityDomain.IMPLEMENTATION):
+            intent_item = claim_a if domain_a in (AuthorityDomain.INTENT, AuthorityDomain.POLICY) else claim_b
+            code_item = claim_b if intent_item is claim_a else claim_a
+            intent_domain = domain_a if intent_item is claim_a else domain_b
+            code_text = text_b if intent_item is claim_a else text_a
+
+            is_violation = intent_domain == AuthorityDomain.POLICY
+            disp = ResolutionDisposition.VIOLATION if is_violation else ResolutionDisposition.DRIFT
+
+            # Check if code violates or bypasses intent/policy
+            violates = any(b in code_text for b in ("bypass", "skips", "missing", "violat", "omits", "without", "disables"))
+            if violates or has_scope_overlap:
+                return AuthorityResolution(
+                    disposition=disp,
+                    domain_a=domain_a,
+                    domain_b=domain_b,
+                    claims_conflict=True,
+                    winner=None,
+                    preserved_claims=[intent_item, code_item],
+                    reason=f"{'VIOLATION' if is_violation else 'DRIFT'}: Implementation diverges from {intent_item.get('id')}.",
+                    evidence=f"Code evidence shows divergence: {code_text[:120]}",
+                    reconciliation_required=True,
+                )
+            return AuthorityResolution(
+                disposition=ResolutionDisposition.AGREES,
+                domain_a=domain_a,
+                domain_b=domain_b,
+                claims_conflict=False,
+                preserved_claims=[claim_a, claim_b],
+                reason="Implementation aligns with authoritative intent.",
+            )
+
+        # 3. IMPLEMENTATION vs IMPLEMENTATION
+        if domain_a == AuthorityDomain.IMPLEMENTATION and domain_b == AuthorityDomain.IMPLEMENTATION:
+            if not has_scope_overlap and scopes_a and scopes_b and not any(s in text_b for s in scopes_a) and not any(s in text_a for s in scopes_b):
+                return AuthorityResolution(
+                    disposition=ResolutionDisposition.INCOMPARABLE,
+                    domain_a=domain_a,
+                    domain_b=domain_b,
+                    claims_conflict=False,
+                    preserved_claims=[claim_a, claim_b],
+                    reason="Distinct non-overlapping scopes.",
+                )
+
+            live_a = claim_a.get("is_live", False) or (claim_a.get("authority") == "code_observed" and not claim_a.get("scope"))
+            live_b = claim_b.get("is_live", False) or (claim_b.get("authority") == "code_observed" and not claim_b.get("scope"))
+
+            contradicts = any(term in text_a for term in ("removed", "deleted", "renamed", "deprecated", "async")) or \
+                          any(term in text_b for term in ("removed", "deleted", "renamed", "deprecated", "async"))
+            if contradicts:
+                winner = "current_code_evidence" if (live_a or live_b) else None
+                return AuthorityResolution(
+                    disposition=ResolutionDisposition.RECORD_STALE if (live_a or live_b) else ResolutionDisposition.CONTRADICTED,
+                    domain_a=domain_a,
+                    domain_b=domain_b,
+                    claims_conflict=True,
+                    winner=winner,
+                    preserved_claims=[claim_b if live_b else claim_a],
+                    reason="Fresh code observation refutes older technical record.",
+                    evidence="Conflicting technical state observed in source.",
+                    reconciliation_required=True,
+                )
+            return AuthorityResolution(
+                disposition=ResolutionDisposition.AGREES,
+                domain_a=domain_a,
+                domain_b=domain_b,
+                claims_conflict=False,
+                preserved_claims=[claim_a, claim_b],
+                reason="Implementation claims are mutually consistent.",
+            )
+
+        # 4. INTENT / POLICY vs INTENT / POLICY
+        if domain_a in (AuthorityDomain.INTENT, AuthorityDomain.POLICY) and domain_b in (AuthorityDomain.INTENT, AuthorityDomain.POLICY):
+            superseded_by_a = claim_b.get("superseded_by") == claim_a.get("id")
+            superseded_by_b = claim_a.get("superseded_by") == claim_b.get("id")
+
+            if superseded_by_a or superseded_by_b:
+                winner = claim_a.get("id") if superseded_by_a else claim_b.get("id")
+                return AuthorityResolution(
+                    disposition=ResolutionDisposition.SUPERSEDED,
+                    domain_a=domain_a,
+                    domain_b=domain_b,
+                    claims_conflict=True,
+                    winner=winner,
+                    preserved_claims=[claim_a if superseded_by_a else claim_b],
+                    reason=f"Explicit supersession: {winner} formally replaces predecessor.",
+                    reconciliation_required=False,
+                )
+
+            if lvl_a >= AuthorityLevel.USER_EXPLICIT_CURRENT and lvl_a > lvl_b:
+                return AuthorityResolution(
+                    disposition=ResolutionDisposition.USER_OVERRIDE,
+                    domain_a=domain_a,
+                    domain_b=domain_b,
+                    claims_conflict=True,
+                    winner=claim_a.get("id", "current_user_intent"),
+                    preserved_claims=[claim_a],
+                    reason="Active user prompt explicitly overrides historical intent.",
+                    reconciliation_required=False,
+                )
+            elif lvl_b >= AuthorityLevel.USER_EXPLICIT_CURRENT and lvl_b > lvl_a:
+                return AuthorityResolution(
+                    disposition=ResolutionDisposition.USER_OVERRIDE,
+                    domain_a=domain_a,
+                    domain_b=domain_b,
+                    claims_conflict=True,
+                    winner=claim_b.get("id", "current_user_intent"),
+                    preserved_claims=[claim_b],
+                    reason="Active user prompt explicitly overrides historical intent.",
+                    reconciliation_required=False,
+                )
+
+            return AuthorityResolution(
+                disposition=ResolutionDisposition.AGREES,
+                domain_a=domain_a,
+                domain_b=domain_b,
+                claims_conflict=False,
+                preserved_claims=[claim_a, claim_b],
+                reason="Authoritative records are consistent or complementary.",
+            )
+
+        return AuthorityResolution(
+            disposition=ResolutionDisposition.UNRESOLVED,
+            domain_a=domain_a,
+            domain_b=domain_b,
+            claims_conflict=False,
+            preserved_claims=[claim_a, claim_b],
+            reason="Unresolved relationship between knowledge claims.",
+        )

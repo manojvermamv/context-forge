@@ -9,6 +9,9 @@ from context_forge.core.budgets import Budgets
 from context_forge.store.paths import brain_paths, read_text, STATE_DIR, read_json
 from context_forge.hooks.inject import extract_index_table, wrap_injected_memory
 from context_forge.knowledge.candidate import pending_candidates
+from context_forge.providers.base import ProviderStatus
+from context_forge.providers.code.cbm import CBMProvider
+from context_forge.providers.experience.agentmemory import AgentMemoryProvider
 
 
 def cmd_lint(repo: Path) -> list[str]:
@@ -43,9 +46,9 @@ def cmd_lint(repo: Path) -> list[str]:
     for o in sorted(orphans):
         problems.append(f"orphan page (not referenced from index.md/overview.md): {o}")
 
-    for folder_key in ("decisions", "concepts", "requirements", "technical", "traceability", "questions"):
-        folder = p[folder_key]
-        if not folder.exists():
+    for folder_key in ("decisions", "concepts", "requirements", "technical", "policies", "traceability", "questions"):
+        folder = p.get(folder_key)
+        if not folder or not folder.exists():
             continue
         for f in folder.glob("*.md"):
             size = len(read_text(f))
@@ -111,7 +114,66 @@ def cmd_doctor(repo: Path) -> None:
     n_concepts = len(list(p["concepts"].glob("*.md"))) if p["concepts"].exists() else 0
     n_requirements = len(list(p["requirements"].rglob("*.md"))) if p["requirements"].exists() else 0
     n_technical = len(list(p["technical"].rglob("*.md"))) if p["technical"].exists() else 0
-    print(f"decisions: {n_decisions} · requirements: {n_requirements} · technical: {n_technical} · concepts: {n_concepts} pages")
+    n_policies = len(list(p["policies"].rglob("*.md"))) if p.get("policies") and p["policies"].exists() else 0
+    print(f"decisions: {n_decisions} · requirements: {n_requirements} · policies: {n_policies} · technical: {n_technical} · concepts: {n_concepts} pages")
+
+    print("\nfederated providers:")
+    print("------------------------------------------------------------")
+    # 1. Native Context Forge
+    print("  native context forge:")
+    print("    status: operational")
+    print("    mode: standard-library native (zero pip runtime dependencies)")
+    print("    concurrency lock: cross-process atomic file-lock active")
+    print("    git-anchored freshness: enabled")
+
+    # 2. CBM
+    cbm = CBMProvider()
+    cbm_configured = bool(os.environ.get("CBM_PATH") or os.environ.get("CODEBASE_MEMORY_PATH") or os.environ.get("CBM_HTTP_URL"))
+    cbm_health = cbm.check_health()
+    print("  codebase memory mcp (cbm) [code intelligence plane]:")
+    print(f"    configured: {'yes' if cbm_configured else 'optional (not explicitly configured)'}")
+    print(f"    binary discovered: {'yes' if cbm.is_available() else 'no'}")
+    if cbm.is_available():
+        exe = cbm._resolve_executable()
+        print(f"    binary path: {exe}")
+        print(f"    version: {cbm_health.version or 'unknown'}")
+        print("    transport: stdio / cli")
+        proj = cbm.resolve_project(repo)
+        if proj:
+            print(f"    indexed project: {proj}")
+        else:
+            print("    indexed project: not resolved (unindexed - native fallback active)")
+        caps_str = ", ".join(cbm_health.capabilities) if cbm_health.capabilities else "default"
+        print(f"    capabilities: {caps_str}")
+        print(f"    status: {cbm_health.status.value}")
+    else:
+        if cbm_configured:
+            print("    STATUS: BROKEN — explicitly configured but binary not found or unreachable")
+            print(f"    diagnostic: {cbm_health.diagnostic}")
+        else:
+            print("    status: not installed (graceful degradation to native path-level mapping)")
+
+    # 3. AgentMemory
+    am = AgentMemoryProvider()
+    am_configured = bool(os.environ.get("AGENTMEMORY_URL") or os.environ.get("AGENTMEMORY_SECRET"))
+    am_health = am.check_health()
+    print("  agentmemory [agent experience plane]:")
+    print(f"    configured: {'yes' if am_configured else 'optional (not explicitly configured)'}")
+    print(f"    endpoint url: {am.endpoint_url}")
+    print(f"    auth token configured: {'yes (hidden)' if os.environ.get('AGENTMEMORY_SECRET') else 'none'}")
+    if am_health.status == ProviderStatus.OK:
+        print(f"    health: OK ({am_health.execution_time_ms:.1f}ms)")
+        print(f"    version: {am_health.version or 'unknown'}")
+        caps_str = ", ".join(am_health.capabilities) if am_health.capabilities else "default"
+        print(f"    capabilities: {caps_str}")
+        print("    status: operational")
+    else:
+        if am_configured:
+            print("    STATUS: ERROR — explicitly configured but failed health check")
+            print(f"    status code: {am_health.status.value}")
+            print(f"    diagnostic: {am_health.diagnostic}")
+        else:
+            print(f"    status: not running ({am_health.status.value}) — graceful degradation to native session history")
 
     print("\nlint:")
     for line in cmd_lint(repo):

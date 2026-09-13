@@ -6,6 +6,7 @@ import time
 import urllib.error
 import urllib.request
 from typing import Any, Optional
+from context_forge.core.evidence import screen_secrets
 from context_forge.providers.base import ExperienceProvider, ProviderResult, ProviderStatus
 
 
@@ -39,25 +40,45 @@ class AgentMemoryProvider(ExperienceProvider):
         return headers
 
     def check_health(self) -> ProviderResult:
-        """Query GET /agentmemory/health to establish status, version, and auth."""
+        """Query GET /agentmemory/health to establish status, version, and auth strictly without false defaults."""
         t0 = time.monotonic()
         try:
             req = urllib.request.Request(
                 f"{self.endpoint_url}/agentmemory/health",
                 headers=self._headers(),
             )
-            with urllib.request.urlopen(req, timeout=1.0) as resp:
+            with urllib.request.urlopen(req, timeout=1.5) as resp:
                 elapsed_ms = (time.monotonic() - t0) * 1000
                 if resp.status == 200:
+                    raw_text = resp.read().decode("utf-8")
                     try:
-                        body = json.loads(resp.read().decode("utf-8"))
-                    except Exception:
-                        body = {}
+                        body = json.loads(raw_text)
+                    except Exception as json_err:
+                        return ProviderResult(
+                            status=ProviderStatus.MALFORMED,
+                            provider=self.name(),
+                            diagnostic_code="MALFORMED_JSON",
+                            diagnostic=f"AgentMemory /health returned invalid JSON: {json_err}",
+                            execution_time_ms=elapsed_ms,
+                        )
+
+                    if not isinstance(body, dict):
+                        return ProviderResult(
+                            status=ProviderStatus.MALFORMED,
+                            provider=self.name(),
+                            diagnostic_code="INVALID_RESPONSE_TYPE",
+                            diagnostic="AgentMemory /health did not return a JSON object.",
+                            execution_time_ms=elapsed_ms,
+                        )
+
+                    version = str(body.get("version", ""))
+                    caps = list(body.get("capabilities", [])) if isinstance(body.get("capabilities"), list) else []
+
                     return ProviderResult(
                         status=ProviderStatus.OK,
                         provider=self.name(),
-                        version=str(body.get("version", "1.0")),
-                        capabilities=body.get("capabilities", ["smart-search", "lessons", "patterns"]),
+                        version=version,
+                        capabilities=caps,
                         diagnostic="AgentMemory healthy and connected.",
                         execution_time_ms=elapsed_ms,
                     )
@@ -67,41 +88,63 @@ class AgentMemoryProvider(ExperienceProvider):
                 return ProviderResult(
                     status=ProviderStatus.UNAUTHORIZED,
                     provider=self.name(),
-                    diagnostic=f"AgentMemory authentication failed (HTTP {exc.code}). AGENTMEMORY_SECRET required.",
+                    diagnostic_code="AUTH_FAILED",
+                    diagnostic=f"AgentMemory authentication failed (HTTP {exc.code}). Valid AGENTMEMORY_SECRET required.",
                     execution_time_ms=elapsed_ms,
                 )
             elif exc.code == 404:
                 return ProviderResult(
                     status=ProviderStatus.INCOMPATIBLE,
                     provider=self.name(),
+                    diagnostic_code="HEALTH_ENDPOINT_NOT_FOUND",
                     diagnostic=f"Endpoint /agentmemory/health not found on {self.endpoint_url}. Verify server version.",
                     execution_time_ms=elapsed_ms,
                 )
             return ProviderResult(
                 status=ProviderStatus.ERROR,
                 provider=self.name(),
-                diagnostic=f"AgentMemory HTTP {exc.code}: {exc.reason}",
+                diagnostic_code=f"HTTP_{exc.code}",
+                diagnostic=screen_secrets(f"AgentMemory HTTP {exc.code}: {exc.reason}"),
+                execution_time_ms=elapsed_ms,
+            )
+        except urllib.error.URLError as exc:
+            elapsed_ms = (time.monotonic() - t0) * 1000
+            return ProviderResult(
+                status=ProviderStatus.UNAVAILABLE,
+                provider=self.name(),
+                diagnostic_code="SERVER_UNREACHABLE",
+                diagnostic=screen_secrets(f"AgentMemory unreachable at {self.endpoint_url}: {exc.reason}"),
+                execution_time_ms=elapsed_ms,
+            )
+        except TimeoutError:
+            elapsed_ms = (time.monotonic() - t0) * 1000
+            return ProviderResult(
+                status=ProviderStatus.TIMEOUT,
+                provider=self.name(),
+                diagnostic_code="HEALTH_TIMEOUT",
+                diagnostic="AgentMemory /health timed out after 1.5s.",
                 execution_time_ms=elapsed_ms,
             )
         except Exception as exc:
             elapsed_ms = (time.monotonic() - t0) * 1000
             return ProviderResult(
-                status=ProviderStatus.UNAVAILABLE,
+                status=ProviderStatus.ERROR,
                 provider=self.name(),
-                diagnostic=f"AgentMemory unreachable at {self.endpoint_url}: {exc}",
+                diagnostic_code="HEALTH_EXCEPTION",
+                diagnostic=screen_secrets(f"AgentMemory health check error: {exc}"),
                 execution_time_ms=elapsed_ms,
             )
         return ProviderResult(
             status=ProviderStatus.UNAVAILABLE,
             provider=self.name(),
-            diagnostic=f"AgentMemory unreachable at {self.endpoint_url}",
+            diagnostic="AgentMemory unreachable at configured URL.",
         )
 
     def is_available(self) -> bool:
         return self.check_health().is_ok()
 
     def recall_lessons_result(self, query: str, limit: int = 5) -> ProviderResult:
-        """Recall lessons using POST /agentmemory/smart-search."""
+        """Recall lessons using POST /agentmemory/smart-search with auth and fallback."""
         t0 = time.monotonic()
         payload = json.dumps({"query": query, "limit": limit}).encode("utf-8")
 
@@ -112,9 +155,20 @@ class AgentMemoryProvider(ExperienceProvider):
                     data=payload,
                     headers=self._headers(),
                 )
-                with urllib.request.urlopen(req, timeout=2.0) as resp:
+                with urllib.request.urlopen(req, timeout=3.0) as resp:
                     elapsed_ms = (time.monotonic() - t0) * 1000
-                    raw_data = json.loads(resp.read().decode("utf-8"))
+                    raw_text = resp.read().decode("utf-8")
+                    try:
+                        raw_data = json.loads(raw_text)
+                    except Exception as json_err:
+                        return ProviderResult(
+                            status=ProviderStatus.MALFORMED,
+                            provider=self.name(),
+                            data=[],
+                            diagnostic_code="MALFORMED_SEARCH_JSON",
+                            diagnostic=f"AgentMemory returned malformed JSON from {endpoint}: {json_err}",
+                            execution_time_ms=elapsed_ms,
+                        )
 
                     # Handle list of items or {memories: [...]} or {results: [...]}
                     items = []
@@ -142,7 +196,7 @@ class AgentMemoryProvider(ExperienceProvider):
                             status=ProviderStatus.NO_RESULTS,
                             provider=self.name(),
                             data=[],
-                            diagnostic=f"AgentMemory smart-search returned 0 results for '{query}'",
+                            diagnostic=f"AgentMemory returned 0 results for '{query}'",
                             execution_time_ms=elapsed_ms,
                         )
 
@@ -161,7 +215,8 @@ class AgentMemoryProvider(ExperienceProvider):
                         status=ProviderStatus.UNAUTHORIZED,
                         provider=self.name(),
                         data=[],
-                        diagnostic=f"AgentMemory authentication failed on {endpoint} (HTTP {exc.code}).",
+                        diagnostic_code="SEARCH_UNAUTHORIZED",
+                        diagnostic=f"AgentMemory authentication rejected on {endpoint} (HTTP {exc.code}).",
                         execution_time_ms=elapsed_ms,
                     )
                 elif exc.code == 404:
@@ -170,7 +225,8 @@ class AgentMemoryProvider(ExperienceProvider):
                     status=ProviderStatus.ERROR,
                     provider=self.name(),
                     data=[],
-                    diagnostic=f"AgentMemory HTTP {exc.code} on {endpoint}: {exc.reason}",
+                    diagnostic_code=f"HTTP_{exc.code}",
+                    diagnostic=screen_secrets(f"AgentMemory HTTP {exc.code} on {endpoint}: {exc.reason}"),
                     execution_time_ms=elapsed_ms,
                 )
             except urllib.error.URLError as exc:
@@ -179,16 +235,18 @@ class AgentMemoryProvider(ExperienceProvider):
                     status=ProviderStatus.UNAVAILABLE,
                     provider=self.name(),
                     data=[],
-                    diagnostic=f"AgentMemory server unreachable at {self.endpoint_url}: {exc}",
+                    diagnostic_code="SEARCH_SERVER_UNREACHABLE",
+                    diagnostic=screen_secrets(f"AgentMemory server unreachable at {self.endpoint_url}: {exc.reason}"),
                     execution_time_ms=elapsed_ms,
                 )
             except TimeoutError:
                 elapsed_ms = (time.monotonic() - t0) * 1000
                 return ProviderResult(
-                    status=ProviderStatus.DEGRADED,
+                    status=ProviderStatus.TIMEOUT,
                     provider=self.name(),
                     data=[],
-                    diagnostic="AgentMemory request timed out after 2.0s.",
+                    diagnostic_code="SEARCH_TIMEOUT",
+                    diagnostic=f"AgentMemory request timed out after 3.0s on {endpoint}.",
                     execution_time_ms=elapsed_ms,
                 )
             except Exception as exc:
@@ -197,7 +255,8 @@ class AgentMemoryProvider(ExperienceProvider):
                     status=ProviderStatus.ERROR,
                     provider=self.name(),
                     data=[],
-                    diagnostic=f"AgentMemory unexpected error: {exc}",
+                    diagnostic_code="SEARCH_EXCEPTION",
+                    diagnostic=screen_secrets(f"AgentMemory unexpected search error: {exc}"),
                     execution_time_ms=elapsed_ms,
                 )
 
@@ -207,4 +266,3 @@ class AgentMemoryProvider(ExperienceProvider):
             data=[],
             diagnostic="AgentMemory search endpoints (/agentmemory/smart-search, /agentmemory/search) not found.",
         )
-

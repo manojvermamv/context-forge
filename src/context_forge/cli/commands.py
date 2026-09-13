@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Optional
-from context_forge.core.models import today, now_iso
+from context_forge.core.models import today, now_iso, IdentityEnvelope
+from context_forge.core.identity import get_git_info
 from context_forge.core.budgets import Budgets
 from context_forge.core.evidence import screen_secrets
 from context_forge.store.paths import brain_paths, atomic_write, read_text, read_json, STATE_DIR, BRAIN_SCHEMA_VERSION
@@ -34,7 +35,7 @@ def cmd_init(repo: Path, force: bool = False) -> None:
     if p["root"].exists() and not force:
         print(f"[brain] {p['root']} already exists (use --force only to replace template-managed root files)")
     p["root"].mkdir(parents=True, exist_ok=True)
-    for key in ("decisions", "concepts", "requirements", "technical", "traceability", "questions", "audit"):
+    for key in ("decisions", "concepts", "requirements", "technical", "policies", "traceability", "questions", "audit"):
         p[key].mkdir(exist_ok=True)
     p["state"].mkdir(exist_ok=True)
 
@@ -118,17 +119,48 @@ def cmd_scan(repo: Path) -> int:
         cmd_init(repo)
     cmd_map(repo)
 
+    commit_sha, branch, worktree = ("", "", "")
+    if (repo / ".git").exists():
+        commit_sha, branch, worktree = get_git_info(repo)
+
     map_record = p["technical"] / "codebase-map.md"
     if not map_record.exists():
-        atomic_write(
-            map_record,
-            "---\n"
-            "id: TECH-CODEBASE-MAP\nstatus: observed\nauthority: code_observed\n"
-            f"updated: {today()}\n---\n\n# Codebase Map\n\n"
+        fm = [
+            "---",
+            "id: TECH-CODEBASE-MAP",
+            "kind: technical",
+            "status: observed",
+            "authority: code_observed",
+            f"updated: {today()}",
+            f"created_at: {now_iso()}",
+            "schema_version: 2.0",
+            f"project_id: {repo.name}",
+            f"repository: {repo.name}",
+        ]
+        if commit_sha:
+            fm.append(f"commit_sha: {commit_sha}")
+            fm.append(f"evidence_observed_commit: {commit_sha}")
+        if branch:
+            fm.append(f"branch: {branch}")
+        fm.extend([
+            "producer: scanner",
+            "producer_type: tool",
+            "authority_domain: IMPLEMENTATION",
+            "authority_level: 70",
+            "---",
+            "",
+            "# Codebase Map",
+            "",
             "The generated [code map](../map.md) is the authoritative structural view. "
             "This record exists so any agent can route to it without treating source "
-            "structure as product intent.\n\n## Evidence\n\n- Deterministic local scan of the repository.\n"
-        )
+            "structure as product intent.",
+            "",
+            "## Evidence",
+            "",
+            "- Deterministic local scan of the repository.",
+            "",
+        ])
+        atomic_write(map_record, "\n".join(fm))
 
     test_files = []
     from context_forge.providers.code.native import IGNORE_DIRS
@@ -139,22 +171,56 @@ def cmd_scan(repo: Path) -> int:
     testing = p["technical"] / "testing.md"
     if not testing.exists():
         bullets = "\n".join(f"- `{item}`" for item in sorted(test_files)[:40]) or "- No conventional test files were detected."
-        atomic_write(
-            testing,
-            "---\n"
-            "id: TECH-TESTING\nstatus: observed\nauthority: code_observed\n"
-            f"updated: {today()}\n---\n\n# Testing\n\n"
-            "This is a code-observed starting point, not a statement of required quality.\n\n"
-            "## Detected test files\n\n" + bullets + "\n"
-        )
+        fm_t = [
+            "---",
+            "id: TECH-TESTING",
+            "kind: technical",
+            "status: observed",
+            "authority: code_observed",
+            f"updated: {today()}",
+            f"created_at: {now_iso()}",
+            "schema_version: 2.0",
+            f"project_id: {repo.name}",
+            f"repository: {repo.name}",
+        ]
+        if commit_sha:
+            fm_t.append(f"commit_sha: {commit_sha}")
+            fm_t.append(f"evidence_observed_commit: {commit_sha}")
+        if branch:
+            fm_t.append(f"branch: {branch}")
+        fm_t.extend([
+            "producer: scanner",
+            "producer_type: tool",
+            "authority_domain: IMPLEMENTATION",
+            "authority_level: 70",
+            "---",
+            "",
+            "# Testing",
+            "",
+            "This is a code-observed starting point, not a statement of required quality.",
+            "",
+            "## Detected test files",
+            "",
+            bullets,
+            "",
+        ])
+        atomic_write(testing, "\n".join(fm_t))
 
-    append_audit_log(p, "scan", map_record, "Created a deterministic technical baseline; no requirements or decisions were inferred.")
+    audit_ident = IdentityEnvelope(commit_sha=commit_sha, branch=branch, producer="scanner")
+    append_audit_log(p, "scan", map_record, "Created a deterministic technical baseline; no requirements or decisions were inferred.", identity=audit_ident)
     cmd_index(repo)
     print(f"[brain] scan complete — technical baseline is available under {p['technical'].relative_to(repo)}")
     return 0
 
 
-def cmd_context(repo: Path, query: str = "", paths: list[str] | None = None) -> None:
+def cmd_context(
+    repo: Path,
+    query: str = "",
+    paths: list[str] | None = None,
+    pointers_only: bool = False,
+    output_format: str = "text",
+    explain: bool = False,
+) -> None:
     p = brain_paths(repo)
     if not p["root"].exists():
         print(f"[brain] {repo} is not initialized — run `brain.py init {repo}`")
@@ -163,13 +229,42 @@ def cmd_context(repo: Path, query: str = "", paths: list[str] | None = None) -> 
         cmd_index(repo)
 
     pack = compile_context_pack(repo, query, paths)
-    selected = list(pack.next_reading)
 
-    print("Read these files, in order:")
-    for item in selected:
-        print(f"- {item}")
-    if query and len(selected) <= 3 and not pack.authoritative_intent:
-        print("- No confident routed match; use map.md before broad source exploration.")
+    if pointers_only:
+        selected = list(pack.next_reading)
+        print("Read these files, in order:")
+        for item in selected:
+            print(f"- {item}")
+        if query and len(selected) <= 3 and not pack.authoritative_intent:
+            print("- No confident routed match; use map.md before broad source exploration.")
+        return pack
+
+    if output_format == "json":
+        print(json.dumps(pack.to_dict(), indent=2))
+        return pack
+
+    # Default output: rendered Markdown context pack directly usable by LLM coding agents
+    rendered = pack.to_text()
+    try:
+        print(rendered)
+    except UnicodeEncodeError:
+        safe_out = rendered.encode(getattr(sys.stdout, "encoding", "utf-8") or "utf-8", errors="replace").decode(
+            getattr(sys.stdout, "encoding", "utf-8") or "utf-8"
+        )
+        print(safe_out)
+
+    if explain and pack.provider_diagnostics:
+        print("\n--- Provider Diagnostics Explanation ---")
+        for diag in pack.provider_diagnostics:
+            if isinstance(diag, dict):
+                prov = diag.get("provider") or diag.get("provider_name", "provider")
+                st = diag.get("status", "unknown")
+                msg = diag.get("diagnostic_message") or diag.get("diagnostic", "")
+                print(f"[{prov}]: status={st} · {msg}")
+            else:
+                print(f" - {diag}")
+
+    return pack
 
 
 def cmd_pending_review(repo: Path) -> None:

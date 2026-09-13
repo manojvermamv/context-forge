@@ -267,12 +267,14 @@ class ContextForgeV2ModuleTests(unittest.TestCase):
 
             runner = tmp_dir / "cbm_runner.py"
             runner.write_text(
-                'import sys, json\n'
+                'import sys, json, os\n'
                 'if "--version" in sys.argv:\n'
                 '    print("0.10.8")\n'
                 'elif len(sys.argv) >= 3 and sys.argv[1] == "cli":\n'
                 '    tool = sys.argv[2]\n'
-                '    if tool == "search_graph":\n'
+                '    if tool == "list_projects":\n'
+                '        print(json.dumps([{"name": "risk-proj", "root_path": os.getcwd().replace(chr(92), "/")}]))\n'
+                '    elif tool == "search_graph":\n'
                 '        print(json.dumps([{"name": "RiskGate", "path": "src/risk.py", "signature": "class RiskGate"}]))\n'
                 '    else:\n'
                 '        print(json.dumps([]))\n',

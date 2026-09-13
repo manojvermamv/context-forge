@@ -3,7 +3,12 @@ from context_forge.traceability.freshness import (
     check_record_freshness,
     update_repository_freshness,
 )
-from context_forge.traceability.resolver import resolve_traceability_graph
+from context_forge.traceability.resolver import (
+    resolve_traceability_graph,
+    reconcile_traceability_with_provider,
+    TraceEdge,
+    TraceEdgeType,
+)
 from context_forge.traceability.sync import reconcile_sync
 
 __all__ = [
@@ -11,5 +16,8 @@ __all__ = [
     "check_record_freshness",
     "update_repository_freshness",
     "resolve_traceability_graph",
+    "reconcile_traceability_with_provider",
+    "TraceEdge",
+    "TraceEdgeType",
     "reconcile_sync",
 ]

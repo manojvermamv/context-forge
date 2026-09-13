@@ -7,12 +7,21 @@
   "required": ["task", "compiled_at", "total_chars", "sections"],
   "properties": {
     "task": { "type": "string" },
-    "compiled_at": { "type": "string", "format": "date-time" },
+    "compiled_at": { "type": "string" },
     "total_chars": { "type": "integer" },
     "estimated_tokens": { "type": "integer" },
     "budget_chars": { "type": "integer" },
     "sections": {
       "type": "object",
+      "required": [
+        "authoritative_intent",
+        "current_implementation",
+        "past_experience",
+        "open_questions",
+        "conflicts_and_staleness",
+        "next_reading",
+        "provider_diagnostics"
+      ],
       "properties": {
         "authoritative_intent": {
           "type": "array",
@@ -50,6 +59,13 @@
           "description": "Health, status, and connection diagnostics for external and native intelligence providers"
         }
       }
-    }
+    },
+    "authoritative_intent": { "type": "array" },
+    "current_implementation": { "type": "array" },
+    "past_experience": { "type": "array" },
+    "open_questions": { "type": "array" },
+    "conflicts_and_staleness": { "type": "array" },
+    "next_reading": { "type": "array" },
+    "provider_diagnostics": { "type": "array" }
   }
 }

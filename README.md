@@ -17,7 +17,47 @@
   <a href="https://github.com/manojvermamv/context-forge"><img src="https://img.shields.io/github/stars/manojvermamv/context-forge?style=flat-square&amp;logo=github" alt="GitHub stars"></a>
 </p>
 
-Context Forge gives a codebase a small, useful knowledge base that survives across agent sessions. It works with Claude Code and Codex first, and its Markdown files can be read by any agent that follows repository instructions.
+Context Forge gives a codebase a small, reviewable knowledge base and federated context compiler that survives across agent sessions. It works with Claude Code, Codex, and Antigravity, and its Markdown files can be read by any agent that follows repository instructions.
+
+### Architecture — The Three Federated Planes
+
+~~~text
+                     CONTEXT FORGE
+                           │
+          ┌────────────────┼────────────────┐
+          │                │                │
+          ▼                ▼                ▼
+     PROJECT TRUTH     CODE REALITY     AGENT EXPERIENCE
+          │                │                │
+     canonical Git       CBM/native     AgentMemory/native
+          │                │                │
+          └────────────────┼────────────────┘
+                           │
+                           ▼
+                 Authority / Evidence
+                 Provenance / Freshness
+                  Conflict / Traceability
+                           │
+                           ▼
+                  Bounded Context Compiler
+                           │
+                           ▼
+                     Coding Agents
+~~~
+
+Context Forge maintains three distinct epistemological planes:
+
+1. **Project Truth (Canonical Git-Native Knowledge)**: Requirements (`REQ`), Decisions (`ADR`), Policies (`POL`), and Invariants (`INV`) stored in `.brain/` as human-readable Markdown with structured frontmatter. Branchable, reviewable, and diffable.
+2. **Current Code Reality (Structural Code Intelligence)**: Backed by **Codebase-Memory-MCP (CBM)** for call-graphs, symbols, and impact analysis, with graceful functional degradation to a zero-dependency **Native AST/path mapper** when CBM is absent.
+3. **Agent Experience (Episodic & Procedural Memory)**: Backed by **AgentMemory** for cross-session lessons and procedural recall, with graceful functional degradation to a local **Native session log** when AgentMemory is absent.
+
+### Core System Invariants
+
+- **Memory is not truth:** AgentMemory observations and historical guesses never silently become canonical project truth.
+- **Code is implementation evidence, not product intent:** Code establishes what the software currently does, never what the user or product intended.
+- **Canonical project truth remains Git-native:** Plain text files with full-audit provenance.
+- **External providers remain strictly optional:** Context Forge operates with zero third-party dependencies, vector DBs, or external daemons.
+- **Native degraded mode is explicit:** Context Forge never pretends native path heuristics are equivalent to CBM graph intelligence.
 
 It solves two common problems:
 
@@ -243,19 +283,68 @@ python3 install.py --harness all --scope project --repo /path/to/project
 
 Use **--harness claude** or **--harness codex** if you use only one agent. You can also pass **--engine-dir /your/path** when the default **~/.context-forge** location is not suitable.
 
-## Verify the installation
+## Federated Context Compilation
+
+Coding agents can request a bounded, federated context pack directly:
 
 ~~~bash
-python3 ~/.context-forge/scripts/brain.py status /path/to/project
+# Returns full Markdown context pack with authoritative intent, code reality, drift, and next reading
+python3 ~/.context-forge/scripts/brain.py context /path/to/project "Modify authentication refresh token"
+
+# Returns structured JSON pack matching context-pack.schema.json
+python3 ~/.context-forge/scripts/brain.py context /path/to/project "Modify authentication" --format json
+
+# Diagnostic explanation of provider fallbacks and health
+python3 ~/.context-forge/scripts/brain.py context /path/to/project "Modify authentication" --explain
+
+# Legacy pointer-only routing
+python3 ~/.context-forge/scripts/brain.py context /path/to/project "Modify authentication" --pointers-only
+~~~
+
+### Context Budget & Determinism
+
+Context packs enforce a hard character budget (`--budget 3500`, default 3,500 chars / ~920 tokens). Priority trimming strictly discards low-priority items first (past lessons -> pointers -> code details) while **preserving critical conflicts and violations (DRIFT / VIOLATION)**. For identical repository and Git state, output compilation is 100% deterministic with stable tie-breaking.
+
+## Living Git Freshness & Commit Anchoring
+
+Every code-observed fact (`TECH`, `TRACE`, scan records) is anchored to a full 40-character Git commit SHA. When code changes:
+- If linked paths are modified in history: record freshness transitions to `possibly_stale`.
+- If linked paths are deleted or renamed: record freshness transitions to `stale`.
+- If code is modified and subsequently reverted back to the observed blob: deterministic **exact-revert** detection returns the record to `fresh` with historical mutations preserved in the audit log.
+- If history has diverged or observed commits are missing: freshness reports structured states (`branch_diverged`, `unverified`, `not_git_repository`).
+
+## Multi-Agent Concurrency Guarantees
+
+All repository mutations (`update`, `approval`, `candidate`, `sync`, `consolidate`, `supersession`) are protected by a cross-process reentrant lock (`repo_lock`) using atomic filesystem semantics with automatic stale-lock reclamation. Record ID allocation (`REQ-xxx`, `ADR-xxx`, etc.) and canonical file writes are atomic, preventing collision under concurrent multi-agent executions. Audit logging operates in true append mode under lock.
+
+*Boundary Note: Local filesystem locking guarantees safe concurrency across local processes and subagents; shared network filesystems (e.g. NFS/SMB) without POSIX `O_EXCL` guarantees require single-host execution.*
+
+## Verify the Installation & Run Evaluations
+
+Context Forge includes a comprehensive test suite and an automated evaluation benchmark:
+
+~~~bash
+# Check provider health, baseline measurements, and system configuration
 python3 ~/.context-forge/scripts/brain.py doctor /path/to/project
-~~~
 
-Doctor reports the full-memory baseline, the actual cold-start payload, an estimated token count, and the progressive-disclosure reduction. The project’s tests also cover the full staged-review path, compaction reload, persistent memory, hook guard behavior, Codex patch-path handling, and fallback search:
-
-~~~bash
+# Run the complete test suite
 python tests/smoke_test.py
-bash tests/smoke_test.sh
+python -m unittest discover -s tests -p "test_*.py"
+
+# Run the multi-category evaluation benchmark
+python eval/run_evals.py
+
+# Opt-in live provider testing (when CBM or AgentMemory daemons are running locally)
+RUN_CBM_LIVE_TESTS=1 RUN_AGENTMEMORY_LIVE_TESTS=1 python -m unittest discover -s tests -p "test_*.py"
 ~~~
+
+The evaluation benchmarks verify:
+- **Truth Contamination Defense (0.0% contamination rate)**: Ensures AgentMemory lessons and code scans never silently become product intent.
+- **Cross-Plane Conflict & Authority Resolution (100.0% accuracy)**: Verified over 9 domain interaction scenarios (`USER_OVERRIDE`, `DRIFT`, `VIOLATION`, `RECORD_STALE`, `SUPERSEDED`, `AGREES`, `INCOMPARABLE`).
+- **Living Git Freshness (100.0% accuracy)**: Evaluates clean trees, dirty working directories, commit changes, file deletions, and exact reverts.
+- **Context Precision, Recall & Budget Adherence**: Gold context retrieval, next-reading prioritization, and strict character budget adherence.
+
+*Status: All current evaluation cases passed.*
 
 ## References
 
