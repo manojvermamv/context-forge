@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/manojvermamv/context-forge/schemas/context-pack.schema.json",
+  "title": "ContextForgeContextPack",
+  "description": "Compiled task-specific context pack with strict character/token budget.",
+  "type": "object",
+  "required": ["task", "compiled_at", "total_chars", "sections"],
+  "properties": {
+    "task": { "type": "string" },
+    "compiled_at": { "type": "string", "format": "date-time" },
+    "total_chars": { "type": "integer" },
+    "estimated_tokens": { "type": "integer" },
+    "budget_chars": { "type": "integer" },
+    "sections": {
+      "type": "object",
+      "properties": {
+        "authoritative_intent": {
+          "type": "array",
+          "items": { "type": "object" },
+          "description": "Authoritative requirements and ADRs (authority >= 90)"
+        },
+        "current_implementation": {
+          "type": "array",
+          "items": { "type": "object" },
+          "description": "Observed code symbols, callers, impacted files (from Native or CBM)"
+        },
+        "past_experience": {
+          "type": "array",
+          "items": { "type": "object" },
+          "description": "Relevant lessons, prior failures, and workflow observations"
+        },
+        "open_questions": {
+          "type": "array",
+          "items": { "type": "object" },
+          "description": "Unresolved ambiguities"
+        },
+        "conflicts_and_staleness": {
+          "type": "array",
+          "items": { "type": "object" },
+          "description": "Identified conflicts or stale assumptions"
+        },
+        "next_reading": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Strictly bounded 1-3 file paths recommended for opening"
+        }
+      }
+    }
+  }
+}

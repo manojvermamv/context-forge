@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/manojvermamv/context-forge/schemas/record.schema.json",
+  "title": "ContextForgeKnowledgeRecord",
+  "description": "Canonical schema for durable knowledge records in Context Forge v2.",
+  "type": "object",
+  "required": ["id", "kind", "title", "status", "authority", "updated"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^(ADR|REQ|TECH|Q|TRACE|CONCEPT)-[A-Za-z0-9_-]+$"
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["decision", "requirement", "technical", "question", "traceability", "concept"]
+    },
+    "title": {
+      "type": "string",
+      "minLength": 3
+    },
+    "status": {
+      "type": "string",
+      "enum": ["accepted", "observed", "open", "linked", "deprecated", "superseded", "rejected"]
+    },
+    "authority": {
+      "type": "string",
+      "enum": [
+        "user_explicit",
+        "code_observed",
+        "derived_link",
+        "unresolved",
+        "agent_inference",
+        "external_source"
+      ]
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "default": 1.0
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated": {
+      "type": "string"
+    },
+    "evidence": {
+      "$ref": "evidence.schema.json"
+    },
+    "identity": {
+      "$ref": "identity-envelope.schema.json"
+    },
+    "scope": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "affected_symbols": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "affected_tests": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "supersedes": {
+      "type": "string"
+    },
+    "superseded_by": {
+      "type": "string"
+    },
+    "freshness": {
+      "type": "string",
+      "enum": ["fresh", "possibly_stale", "stale", "contradicted", "unverified"],
+      "default": "fresh"
+    },
+    "body": {
+      "type": "string"
+    }
+  }
+}

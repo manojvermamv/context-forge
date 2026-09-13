@@ -88,8 +88,9 @@ def _atomic_write(path: Path, text: str) -> None:
 def install_engine(engine_dir: Path) -> None:
     """Refresh tracked engine files without deleting unrelated local files."""
     engine_dir.mkdir(parents=True, exist_ok=True)
-    for subdir in ("scripts", "templates"):
-        shutil.copytree(HERE / subdir, engine_dir / subdir, dirs_exist_ok=True)
+    for subdir in ("scripts", "templates", "src", "schemas"):
+        if (HERE / subdir).exists():
+            shutil.copytree(HERE / subdir, engine_dir / subdir, dirs_exist_ok=True)
     for name in ("SKILL.md", "AGENTS.md.snippet.md"):
         _atomic_write(
             engine_dir / name,

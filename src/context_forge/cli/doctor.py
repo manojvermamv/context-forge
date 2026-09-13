@@ -1,0 +1,135 @@
+from __future__ import annotations
+
+import json
+import os
+import re
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+from context_forge.core.budgets import Budgets
+from context_forge.store.paths import brain_paths, read_text, STATE_DIR, read_json
+from context_forge.hooks.inject import extract_index_table, wrap_injected_memory
+from context_forge.knowledge.candidate import pending_candidates
+
+
+def cmd_lint(repo: Path) -> list[str]:
+    p = brain_paths(repo)
+    problems = []
+    if not p["root"].exists():
+        return [f"{repo} is not initialized (run `brain.py init {repo}`)"]
+
+    all_pages = {
+        str(m.relative_to(repo)).replace("\\", "/")
+        for m in p["root"].rglob("*.md")
+        if STATE_DIR not in m.parts and (not p["audit"].exists() or p["audit"] not in m.parents)
+    }
+    linked = set()
+    for source in (p["index_md"], p["overview"]):
+        for destination in re.findall(r"\]\(([^)#\s]+\.md)(?:#[^)]*)?\)", read_text(source)):
+            target = repo / destination if destination.startswith(".brain/") else source.parent / destination
+            try:
+                linked.add(str(target.resolve().relative_to(repo.resolve())).replace("\\", "/"))
+            except ValueError:
+                continue
+
+    core = {
+        ".brain/current-state.md",
+        ".brain/index.md",
+        ".brain/overview.md",
+        ".brain/status.md",
+        ".brain/log.md",
+        ".brain/map.md",
+    }
+    orphans = all_pages - linked - core
+    for o in sorted(orphans):
+        problems.append(f"orphan page (not referenced from index.md/overview.md): {o}")
+
+    for folder_key in ("decisions", "concepts", "requirements", "technical", "traceability", "questions"):
+        folder = p[folder_key]
+        if not folder.exists():
+            continue
+        for f in folder.glob("*.md"):
+            size = len(read_text(f))
+            if size > Budgets.TOPIC_CHARS:
+                problems.append(
+                    f"oversized page ({size} > {Budgets.TOPIC_CHARS} char budget): "
+                    f"{f.relative_to(repo)} — candidate for `brain.py consolidate`"
+                )
+
+    cs = read_text(p["current_state"])
+    if len(cs) > Budgets.L0_CHARS:
+        problems.append(f"current-state.md is {len(cs)} chars, over the {Budgets.L0_CHARS} cold-start budget")
+    m = re.search(r"Last updated ([\dT:\-Z]+)", cs)
+    if m:
+        try:
+            last = datetime.strptime(m.group(1), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) - last > timedelta(days=30):
+                problems.append(f"current-state.md hasn't been touched in {(datetime.now(timezone.utc) - last).days} days — likely stale")
+        except ValueError:
+            pass
+
+    if not problems:
+        problems.append("clean — no structural issues found")
+    return problems
+
+
+def cmd_doctor(repo: Path) -> None:
+    p = brain_paths(repo)
+    print(f"context-forge doctor — {repo}")
+    print("-" * 60)
+    if not p["root"].exists():
+        print("NOT INITIALIZED — run `brain.py init <repo>`")
+        return
+
+    cs = read_text(p["current_state"])
+    mp = read_text(p["map"])
+    canonical_pages = [page for page in p["root"].rglob("*.md") if STATE_DIR not in page.parts]
+    canonical_chars = sum(len(read_text(page)) for page in canonical_pages)
+    route_chars = len(extract_index_table(read_text(p["index_md"]), max_rows=8))
+    cold_start_chars = len(wrap_injected_memory(
+        cs + "\n" + extract_index_table(read_text(p["index_md"]), max_rows=8)
+    ))
+
+    print(Budgets.char_budget_note("current-state.md (cold-start)", len(cs), Budgets.L0_CHARS))
+    print(Budgets.char_budget_note("map.md", len(mp), Budgets.MAP_CHARS))
+    print(f"canonical wiki baseline: {canonical_chars} chars across {len(canonical_pages)} pages")
+    print(f"cold-start payload: {cold_start_chars} chars (~{Budgets.rough_tokens(cold_start_chars)} tokens; chars/3.8 estimate)")
+    if canonical_chars:
+        reduction = max(0, round((1 - cold_start_chars / canonical_chars) * 100))
+        print(f"progressive-disclosure reduction vs whole-wiki injection: {reduction}%")
+    print(f"route table shown at cold start: {route_chars} chars; per-turn ceiling: {Budgets.TURN_MAX_POINTERS} pointers (and zero bytes when no confident match)")
+    print(f"pending capture candidates: {len(pending_candidates(p))} (canonical writes require review --approve)")
+
+    idx_db, idx_json = p["search_index_db"], p["search_index_json"]
+    if idx_db.exists():
+        print(f"search index: sqlite-fts5 ({idx_db.stat().st_size} bytes)")
+    elif idx_json.exists():
+        print(f"search index: json-inverted-index ({idx_json.stat().st_size} bytes)")
+    else:
+        print("search index: MISSING — run `brain.py index <repo>`")
+
+    n_decisions = len(list(p["decisions"].glob("*.md"))) if p["decisions"].exists() else 0
+    n_concepts = len(list(p["concepts"].glob("*.md"))) if p["concepts"].exists() else 0
+    n_requirements = len(list(p["requirements"].rglob("*.md"))) if p["requirements"].exists() else 0
+    n_technical = len(list(p["technical"].rglob("*.md"))) if p["technical"].exists() else 0
+    print(f"decisions: {n_decisions} · requirements: {n_requirements} · technical: {n_technical} · concepts: {n_concepts} pages")
+
+    print("\nlint:")
+    for line in cmd_lint(repo):
+        print(f"  - {line}")
+
+    llm_cmd = os.environ.get("BRAIN_LLM_CMD")
+    print(f"\ngenerative pass (semantic review only): {'ENABLED via BRAIN_LLM_CMD' if llm_cmd else 'disabled (deterministic-only mode)'}")
+
+
+def cmd_status(repo: Path) -> None:
+    p = brain_paths(repo)
+    if not p["root"].exists():
+        print("not initialized")
+        return
+    cs_age = "?"
+    m = re.search(r"Last updated ([\dT:\-Z]+)", read_text(p["current_state"]))
+    if m:
+        cs_age = m.group(1)
+    registry = "registry" if p["registry"].exists() else "NO registry"
+    indexed = (p["search_index_db"].exists() or p["search_index_json"].exists())
+    print(f"initialized · current-state last updated {cs_age} · {registry} · {'indexed' if indexed else 'NOT indexed'}")

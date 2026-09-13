@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/manojvermamv/context-forge/schemas/evidence.schema.json",
+  "title": "ContextForgeEvidence",
+  "description": "Sanitized evidence statement, proof references, and verification digest.",
+  "type": "object",
+  "required": ["statement", "authority_level"],
+  "properties": {
+    "statement": {
+      "type": "string",
+      "description": "Human or code statement proving the claim without secrets or raw conversational dumps."
+    },
+    "authority_level": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100,
+      "description": "Numeric priority ranking (100 = User Explicit, 80 = Current Code AST, 40 = Agent Observation)."
+    },
+    "source_type": {
+      "type": "string",
+      "enum": ["user_input", "code_ast", "git_commit", "test_result", "audit_log", "external_doc"]
+    },
+    "source_refs": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "List of path:line pointers or commit references."
+    },
+    "contains_redactions": {
+      "type": "boolean",
+      "default": false
+    },
+    "verified_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}
