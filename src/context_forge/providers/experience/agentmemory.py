@@ -53,7 +53,7 @@ class AgentMemoryProvider(ExperienceProvider):
                     raw_text = resp.read().decode("utf-8")
                     try:
                         body = json.loads(raw_text)
-                    except Exception as json_err:
+                    except (json.JSONDecodeError, UnicodeDecodeError) as json_err:
                         return ProviderResult(
                             status=ProviderStatus.MALFORMED,
                             provider=self.name(),
@@ -71,7 +71,35 @@ class AgentMemoryProvider(ExperienceProvider):
                             execution_time_ms=elapsed_ms,
                         )
 
-                    version = str(body.get("version", ""))
+                    # Validate that response exhibits real compatible structure
+                    has_status = "status" in body
+                    raw_status = str(body.get("status", "")).lower()
+                    has_service = any(k in body for k in ("service", "name", "app")) and any(
+                        "agentmemory" in str(body[k]).lower() or "agent-memory" in str(body[k]).lower()
+                        for k in ("service", "name", "app") if k in body
+                    )
+                    has_version = bool(body.get("version"))
+                    has_capabilities = isinstance(body.get("capabilities"), list) and len(body.get("capabilities", [])) > 0
+
+                    if not (has_status or has_service or has_version or has_capabilities):
+                        return ProviderResult(
+                            status=ProviderStatus.INCOMPATIBLE,
+                            provider=self.name(),
+                            diagnostic_code="INCOMPATIBLE_HEALTH_RESPONSE",
+                            diagnostic="AgentMemory /health returned arbitrary or unrecognized JSON structure (missing status, service identity, version, or capabilities).",
+                            execution_time_ms=elapsed_ms,
+                        )
+
+                    if has_status and raw_status in ("down", "error", "unhealthy", "failed"):
+                        return ProviderResult(
+                            status=ProviderStatus.ERROR,
+                            provider=self.name(),
+                            diagnostic_code="HEALTH_STATUS_DOWN",
+                            diagnostic=f"AgentMemory reported unhealthy status: {body.get('status')}",
+                            execution_time_ms=elapsed_ms,
+                        )
+
+                    version = str(body.get("version", "")) if has_version else ""
                     caps = list(body.get("capabilities", [])) if isinstance(body.get("capabilities"), list) else []
 
                     return ProviderResult(
@@ -160,7 +188,7 @@ class AgentMemoryProvider(ExperienceProvider):
                     raw_text = resp.read().decode("utf-8")
                     try:
                         raw_data = json.loads(raw_text)
-                    except Exception as json_err:
+                    except (json.JSONDecodeError, UnicodeDecodeError) as json_err:
                         return ProviderResult(
                             status=ProviderStatus.MALFORMED,
                             provider=self.name(),

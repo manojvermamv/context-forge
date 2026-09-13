@@ -56,7 +56,7 @@ def extract_frontmatter_dict(text: str) -> tuple[dict[str, Any], str]:
             elif val.startswith("[") and val.endswith("]"):
                 try:
                     res[key] = json.loads(val)
-                except Exception:
+                except (json.JSONDecodeError, ValueError):
                     res[key] = [x.strip().strip('"\'') for x in val[1:-1].split(",") if x.strip()]
             else:
                 res[key] = val
@@ -162,18 +162,30 @@ def parse_markdown_record(path: Path, root: Path) -> KnowledgeRecord:
         if fm.get("source_ref"):
             ev_refs = [str(fm.get("source_ref"))]
 
+    raw_redact = fm.get("evidence_contains_redactions")
+    if raw_redact is None:
+        raw_redact = fm.get("contains_redactions", False)
+    contains_redactions = str(raw_redact).lower() in ("true", "1", "yes")
+
+    ev_auth = 0
+    if "evidence_authority_level" in fm:
+        try:
+            ev_auth = int(fm["evidence_authority_level"])
+        except (ValueError, TypeError):
+            ev_auth = 0
+
     evidence = EvidenceStatement(
         statement=evidence_text,
-        authority_level=int(fm.get("evidence_authority_level") or fm.get("authority_level") or 0),
+        authority_level=ev_auth,
         source_type=str(fm.get("evidence_source_type") or fm.get("source_type") or "code_observed"),
         source_refs=ev_refs,
-        contains_redactions=bool(fm.get("contains_redactions", False)),
+        contains_redactions=contains_redactions,
         digest=str(fm.get("evidence_digest") or fm.get("digest") or ""),
         observed_commit=str(fm.get("evidence_observed_commit") or fm.get("observed_commit") or ""),
         producer=str(fm.get("evidence_producer") or fm.get("producer") or ""),
         verification_state=str(fm.get("evidence_verification_state") or "unverified"),
         verified_at=str(fm.get("evidence_verified_at") or ""),
-        created_at=str(fm.get("created_at") or fm.get("timestamp") or ""),
+        created_at=str(fm.get("evidence_created_at") or fm.get("evidence_timestamp") or ""),
     )
 
     # Parse Identity metadata
@@ -222,11 +234,11 @@ def parse_markdown_record(path: Path, root: Path) -> KnowledgeRecord:
         "conversation_id", "task_id", "checkpoint_id", "producer", "producer_type",
         "producer_id", "producer_version", "reviewer", "reviewer_id", "harness",
         "model_provider", "model_id", "authority_domain", "authority_level",
-        "observed_at", "evidence_source_type", "evidence_observed_commit",
-        "evidence_digest", "evidence_producer", "evidence_verification_state",
-        "evidence_verified_at", "evidence_source_refs", "source_type", "source_ref",
-        "observed_commit", "digest", "timestamp", "affected_symbols", "affected_tests",
-        "contains_redactions"
+        "observed_at", "evidence_source_type", "evidence_authority_level", "evidence_observed_commit",
+        "evidence_digest", "evidence_producer", "evidence_contains_redactions", "contains_redactions",
+        "evidence_verification_state", "evidence_verified_at", "evidence_created_at",
+        "evidence_observed_at", "evidence_timestamp", "evidence_source_refs", "source_type",
+        "source_ref", "observed_commit", "digest", "timestamp", "affected_symbols", "affected_tests"
     }
     extra = {k: v for k, v in fm.items() if k not in known_keys}
 

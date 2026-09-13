@@ -64,6 +64,7 @@ def compile_context_pack(
         if kind in ("decision", "requirement", "policy", "invariant", "ADR", "REQ", "POL", "INV"):
             authoritative.append({
                 "id": rec_id,
+                "kind": kind,
                 "title": title,
                 "authority": fm.get("authority", "user_explicit"),
                 "body": body[:300].strip(),
@@ -72,6 +73,7 @@ def compile_context_pack(
         elif kind in ("question", "Q"):
             questions.append({
                 "id": rec_id,
+                "kind": kind,
                 "title": title,
                 "question": body[:200].strip(),
             })
@@ -79,6 +81,7 @@ def compile_context_pack(
         elif kind in ("technical", "TECH"):
             recorded_tech.append({
                 "id": rec_id,
+                "kind": kind,
                 "title": title,
                 "details": body[:300].strip(),
                 "path": h["path"],
@@ -94,16 +97,16 @@ def compile_context_pack(
     # 2. Code Truth provider (CBM if available, otherwise Native)
     provider_diagnostics: list[dict[str, Any]] = []
     cbm = CodebaseMemoryMCPProvider()
-    cbm_res = cbm.query_impact_result(task_query, scope_paths)
+    cbm_res = cbm.query_impact_result(repo, task_query, scope_paths)
     provider_diagnostics.append(cbm_res.to_dict())
 
     code_reality: list[dict[str, Any]] = []
-    if cbm_res.is_ok() and cbm_res.data:
+    if (cbm_res.is_ok() or cbm_res.status == ProviderStatus.DEGRADED) and cbm_res.data:
         code_reality = list(cbm_res.data)
     else:
         # Graceful functional degradation to native code mapper
         native_code = NativeCodeProvider()
-        native_res = native_code.query_impact_result(task_query, scope_paths)
+        native_res = native_code.query_impact_result(repo, task_query, scope_paths)
         code_reality = list(native_res.data or [])
         native_dict = native_res.to_dict()
         native_dict["fallback_used"] = True
@@ -119,7 +122,7 @@ def compile_context_pack(
     provider_diagnostics.append(am_res.to_dict())
 
     past_experience: list[dict[str, Any]] = []
-    if am_res.is_ok() and am_res.data:
+    if (am_res.is_ok() or am_res.status == ProviderStatus.DEGRADED) and am_res.data:
         past_experience = list(am_res.data)
     elif am_res.status == ProviderStatus.UNAUTHORIZED:
         past_experience = []
@@ -132,10 +135,12 @@ def compile_context_pack(
         native_exp_dict["diagnostic_message"] = "AgentMemory unavailable; degraded to native session log."
         provider_diagnostics.append(native_exp_dict)
 
-    # 4. Conflict resolution and Cross-Plane Drift Governance
-    detected_conflicts = ConflictResolver.detect_conflicts(authoritative, past_experience)
-    code_drifts = ConflictResolver.detect_code_drift(authoritative, code_reality)
-    all_alerts = staleness_alerts + detected_conflicts + code_drifts
+    # 4. Cross-Plane Conflict & Staleness Reconciler
+    all_alerts: list[dict[str, Any]] = []
+    all_alerts.extend(ConflictResolver.detect_conflicts(authoritative, past_experience))
+    all_alerts.extend(ConflictResolver.detect_code_drift(authoritative, code_reality))
+    all_alerts.extend(ConflictResolver.detect_stale_records(recorded_tech, code_reality))
+    all_alerts.extend(staleness_alerts)
 
     # 5. Task-specific Next Reading prioritization
     task_next_reading: list[str] = []
@@ -180,7 +185,7 @@ def compile_context_pack(
         open_questions=trimmed["open_questions"],
         conflicts_and_staleness=trimmed["conflicts_and_staleness"],
         next_reading=trimmed["next_reading"],
-        provider_diagnostics=provider_diagnostics,
+        provider_diagnostics=trimmed.get("provider_diagnostics", provider_diagnostics),
     )
 
     rendered = pack.to_text()

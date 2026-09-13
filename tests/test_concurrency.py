@@ -1,9 +1,13 @@
 import concurrent.futures
+import multiprocessing as mp
+import os
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from typing import Any
 
 _SRC = Path(__file__).resolve().parent.parent / "src"
 if str(_SRC) not in sys.path:
@@ -14,7 +18,28 @@ from context_forge.knowledge.update import create_knowledge_record, next_record_
 from context_forge.store.audit import append_audit_log
 from context_forge.knowledge.candidate import stage_candidate
 from context_forge.store.paths import brain_paths, read_text
-from context_forge.store.lock import repo_lock
+from context_forge.store.lock import repo_lock, get_lock_path, LockTimeoutError
+
+
+def _proc_hold_lock(repo_path: str, ready_event: Any, release_event: Any, stale_timeout: float) -> None:
+    from pathlib import Path
+    from context_forge.store.lock import repo_lock
+    with repo_lock(Path(repo_path), stale_timeout=stale_timeout):
+        ready_event.set()
+        while not release_event.is_set():
+            time.sleep(0.05)
+
+
+def _proc_try_acquire(repo_path: str, timeout: float, stale_timeout: float, out_queue: Any) -> None:
+    from pathlib import Path
+    from context_forge.store.lock import repo_lock, LockTimeoutError
+    try:
+        with repo_lock(Path(repo_path), timeout=timeout, stale_timeout=stale_timeout):
+            out_queue.put("ACQUIRED")
+    except (LockTimeoutError, TimeoutError):
+        out_queue.put("TIMEOUT")
+    except Exception as e:
+        out_queue.put(f"ERROR: {type(e).__name__}: {e}")
 
 
 class ConcurrencyTestCase(unittest.TestCase):
@@ -104,6 +129,86 @@ class ConcurrencyTestCase(unittest.TestCase):
         self.assertEqual(len(set(ids)), n_cands)
         pending = list(self.p["pending"].glob("*.json"))
         self.assertEqual(len(pending), n_cands)
+
+    def test_reentrant_lock_same_process(self):
+        """Nested lock acquisition in the same process/thread must succeed cleanly."""
+        with repo_lock(self.tmp) as p1:
+            self.assertTrue(p1.exists())
+            with repo_lock(self.tmp) as p2:
+                self.assertEqual(p1, p2)
+                self.assertTrue(p2.exists())
+            # Lock should still exist after exiting inner scope
+            self.assertTrue(p1.exists())
+        # Lock should be cleaned up after exiting outer scope
+        self.assertFalse(p1.exists())
+
+    def test_corrupt_lock_reclamation_after_timeout(self):
+        """Unreadable/corrupt lock files must be safely reclaimed after exceeding stale_timeout."""
+        lock_file = get_lock_path(self.tmp)
+        lock_file.parent.mkdir(parents=True, exist_ok=True)
+        lock_file.write_text("{corrupt: json content", encoding="utf-8")
+
+        # Set mtime to past (> 5s ago)
+        past = time.time() - 10.0
+        os.utime(lock_file, (past, past))
+
+        with repo_lock(self.tmp, timeout=2.0, stale_timeout=1.0) as p:
+            self.assertTrue(p.exists())
+
+    def test_live_owner_never_stolen_and_dead_owner_reclaimed(self):
+        """Cross-process lock held by alive owner is NEVER stolen even past stale_timeout.
+        Dead owner lock IS safely reclaimed.
+        """
+        ready_event = mp.Event()
+        release_event = mp.Event()
+        out_queue = mp.Queue()
+
+        # Step 1: Process A acquires lock with short stale_timeout (0.5s)
+        proc_a = mp.Process(
+            target=_proc_hold_lock,
+            args=(str(self.tmp), ready_event, release_event, 0.5),
+        )
+        proc_a.start()
+        try:
+            self.assertTrue(ready_event.wait(timeout=5.0), "Process A failed to acquire lock")
+
+            # Sleep longer than stale_timeout (0.5s) so lock age > stale_timeout
+            time.sleep(0.8)
+            self.assertTrue(proc_a.is_alive(), "Process A must still be running")
+
+            # Step 2: Process B tries to acquire lock with short timeout (0.2s)
+            # Since Process A is still alive, Process B MUST NOT acquire even though age > 0.5s!
+            proc_b = mp.Process(
+                target=_proc_try_acquire,
+                args=(str(self.tmp), 0.2, 0.5, out_queue),
+            )
+            proc_b.start()
+            proc_b.join(timeout=5.0)
+
+            res = out_queue.get(timeout=2.0)
+            self.assertEqual(res, "TIMEOUT", "Process B improperly stole lock from live Process A!")
+
+            # Step 3: Now terminate Process A (simulating sudden crash/dead owner)
+            proc_a.terminate()
+            proc_a.join(timeout=5.0)
+            self.assertFalse(proc_a.is_alive())
+
+            # Step 4: Process C attempts to acquire lock
+            # Since owner PID is now dead, lock MUST be safely reclaimed!
+            proc_c = mp.Process(
+                target=_proc_try_acquire,
+                args=(str(self.tmp), 2.0, 0.5, out_queue),
+            )
+            proc_c.start()
+            proc_c.join(timeout=5.0)
+
+            res_c = out_queue.get(timeout=2.0)
+            self.assertEqual(res_c, "ACQUIRED", f"Failed to reclaim lock from dead owner: {res_c}")
+        finally:
+            release_event.set()
+            if proc_a.is_alive():
+                proc_a.terminate()
+                proc_a.join(timeout=2.0)
 
 
 if __name__ == "__main__":

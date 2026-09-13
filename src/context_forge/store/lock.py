@@ -27,6 +27,10 @@ class LockTimeoutError(TimeoutError):
     pass
 
 
+import socket
+import uuid
+
+
 def _is_pid_alive(pid: int) -> bool:
     """Check if process with PID is currently alive on the host."""
     if pid <= 0:
@@ -34,16 +38,29 @@ def _is_pid_alive(pid: int) -> bool:
     try:
         if os.name == "nt":
             import ctypes
+            from ctypes import wintypes
             kernel32 = ctypes.windll.kernel32
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
             SYNCHRONIZE = 0x00100000
-            process = kernel32.OpenProcess(SYNCHRONIZE, False, pid)
-            if process != 0:
-                kernel32.CloseHandle(process)
-                return True
+            h_proc = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, False, pid)
+            if not h_proc:
+                err = kernel32.GetLastError()
+                # ERROR_ACCESS_DENIED (5) means process exists and is alive
+                return err == 5
+            exit_code = wintypes.DWORD()
+            if kernel32.GetExitCodeProcess(h_proc, ctypes.byref(exit_code)):
+                kernel32.CloseHandle(h_proc)
+                # STILL_ACTIVE = 259
+                return exit_code.value == 259
+            kernel32.CloseHandle(h_proc)
             return False
         else:
             os.kill(pid, 0)
             return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
     except OSError:
         return False
 
@@ -70,7 +87,13 @@ def repo_lock(
     timeout: float = 15.0,
     stale_timeout: float = 30.0,
 ) -> Generator[Path, None, None]:
-    """Cross-process and reentrant thread-safe lock for repository mutations."""
+    """Cross-process and reentrant thread-safe lock for repository mutations.
+    
+    Invariants:
+    1. A lock held by a confirmed alive local PID is NEVER stolen, regardless of age.
+    2. A lock held by a confirmed dead PID is reclaimed safely.
+    3. Corrupt or unreadable locks are reclaimed only after exceeding stale_timeout.
+    """
     lock_path = get_lock_path(target)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -94,36 +117,68 @@ def repo_lock(
         # Cross-process file lock acquisition loop
         deadline = time.time() + timeout
         acquired_file_lock = False
+        nonce = uuid.uuid4().hex
+        current_host = socket.gethostname()
+        lock_info = {
+            "pid": os.getpid(),
+            "thread": threading.get_ident(),
+            "hostname": current_host,
+            "nonce": nonce,
+            "created_at": time.time(),
+            "acquired_at": time.time(),
+        }
 
         while time.time() < deadline:
             try:
                 fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
-                info = {
-                    "pid": os.getpid(),
-                    "thread": threading.get_ident(),
-                    "acquired_at": time.time(),
-                }
-                os.write(fd, json.dumps(info).encode("utf-8"))
+                os.write(fd, json.dumps(lock_info).encode("utf-8"))
                 os.close(fd)
                 acquired_file_lock = True
                 break
             except FileExistsError:
-                # Check for stale lock
+                # Inspect existing lock
                 try:
                     raw = lock_path.read_text(encoding="utf-8", errors="replace")
-                    data = json.loads(raw) if raw else {}
-                    lock_pid = data.get("pid", 0)
-                    acquired_at = data.get("acquired_at", 0)
-                    age = time.time() - acquired_at
-
-                    # If the holding PID is no longer alive, or exceeds stale_timeout
-                    if (lock_pid and not _is_pid_alive(lock_pid)) or age > stale_timeout:
-                        try:
+                    if not raw.strip():
+                        # Possible concurrent write; verify file age
+                        mtime = lock_path.stat().st_mtime
+                        if time.time() - mtime > stale_timeout:
                             lock_path.unlink(missing_ok=True)
                             continue
-                        except OSError:
-                            pass
-                except Exception:
+                    else:
+                        data = json.loads(raw)
+                        lock_pid = data.get("pid", 0)
+                        lock_host = data.get("hostname", "")
+                        acquired_at = data.get("acquired_at") or data.get("created_at") or 0
+                        age = time.time() - acquired_at
+
+                        if not lock_host or lock_host == current_host:
+                            if lock_pid and lock_pid > 0:
+                                if _is_pid_alive(lock_pid):
+                                    # Owner confirmed alive: lock remains valid regardless of age. NEVER STEAL!
+                                    pass
+                                else:
+                                    # Owner confirmed dead: reclaim safely
+                                    lock_path.unlink(missing_ok=True)
+                                    continue
+                            else:
+                                if age > stale_timeout:
+                                    lock_path.unlink(missing_ok=True)
+                                    continue
+                        else:
+                            # Uncertain hostname: cautious reclamation policy
+                            if age > (stale_timeout * 3):
+                                lock_path.unlink(missing_ok=True)
+                                continue
+                except json.JSONDecodeError:
+                    try:
+                        mtime = lock_path.stat().st_mtime
+                        if time.time() - mtime > stale_timeout:
+                            lock_path.unlink(missing_ok=True)
+                            continue
+                    except OSError:
+                        pass
+                except OSError:
                     pass
 
                 time.sleep(0.02)
@@ -140,7 +195,11 @@ def repo_lock(
             _tls.depth = 0
             _tls.lock_path = None
             try:
-                lock_path.unlink(missing_ok=True)
+                raw = lock_path.read_text(encoding="utf-8", errors="replace")
+                data = json.loads(raw) if raw else {}
+                # Only unlink if this process still owns the lock
+                if data.get("nonce") == nonce or data.get("pid") == os.getpid():
+                    lock_path.unlink(missing_ok=True)
             except OSError:
                 pass
 

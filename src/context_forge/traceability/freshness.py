@@ -70,7 +70,7 @@ def get_git_changed_paths(repo: Path) -> list[str]:
             if len(line) >= 4:
                 paths.append(line[3:].split(" -> ")[-1].replace("\\", "/"))
         return sorted(set(paths))
-    except Exception:
+    except (subprocess.SubprocessError, OSError):
         return []
 
 
@@ -84,7 +84,7 @@ def is_detached_head(repo: Path) -> bool:
             check=False,
         )
         return res.returncode != 0
-    except Exception:
+    except (subprocess.SubprocessError, OSError):
         return False
 
 
@@ -255,7 +255,7 @@ def check_exact_revert(repo: Path, observed_sha: str, path: str) -> bool:
             return False
         cur_hash = res_cur.stdout.strip()
         return obs_hash == cur_hash
-    except Exception:
+    except (subprocess.SubprocessError, OSError):
         return False
 
 
@@ -430,7 +430,7 @@ def evaluate_record_freshness(
         )
         if res_log.returncode == 0 and res_log.stdout.strip():
             was_reverted = True
-    except Exception:
+    except (subprocess.SubprocessError, OSError):
         pass
 
     if was_reverted:

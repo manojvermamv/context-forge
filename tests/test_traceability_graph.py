@@ -79,8 +79,8 @@ class TraceabilityGraphTestCase(unittest.TestCase):
         missing_impl = [e for e in impl_edges if e["target_ref"] == "src/missing_component.py"][0]
         self.assertEqual(missing_impl["verification_state"], "stale")
 
-    def test_cbm_reconciliation_strengthens_edges(self):
-        """When CBM confirms structural presence, edge confidence is upgraded to verified."""
+    def test_provider_reconciliation_with_verify_reference(self):
+        """When provider confirms structural reference, edge confidence is upgraded to verified."""
         create_knowledge_record(
             repo=self.tmp,
             kind="decision",
@@ -98,11 +98,15 @@ class TraceabilityGraphTestCase(unittest.TestCase):
             def is_available(self):
                 return True
 
-            def query_code_intelligence(self, repo, query=""):
+            def name(self):
+                return "cbm"
+
+            def verify_reference(self, repo_path, path, symbol=None, relationship=None):
                 return ProviderResult(
                     status=ProviderStatus.OK,
-                    data={"symbol": "Router", "file": "src/router.py"},
-                    provider_name="cbm",
+                    data={"symbol": "Router", "path": path},
+                    provider="cbm",
+                    diagnostic="Verified in CBM graph.",
                 )
 
         reconciled = reconcile_traceability_with_provider(self.tmp, graph, MockCBMProvider())
@@ -110,6 +114,97 @@ class TraceabilityGraphTestCase(unittest.TestCase):
         self.assertEqual(edge["provider"], "cbm")
         self.assertEqual(edge["verification_state"], "verified")
         self.assertGreater(edge["confidence"], 0.9)
+        self.assertIn("Verified in CBM graph", edge["evidence"])
+
+    def test_provider_reconciliation_missing_reference_marks_stale(self):
+        """When provider reports entity missing (NO_RESULTS), edge is marked stale."""
+        create_knowledge_record(
+            repo=self.tmp,
+            kind="decision",
+            title="Old Router",
+            body="Old router doc.",
+            authority="user_explicit",
+            evidence="Design doc",
+            scope=["src/router.py"],
+            accept=True,
+        )
+        graph = resolve_traceability_graph(self.tmp)
+
+        class MockMissingProvider:
+            def is_available(self):
+                return True
+
+            def name(self):
+                return "cbm"
+
+            def verify_reference(self, repo_path, path, symbol=None, relationship=None):
+                return ProviderResult(
+                    status=ProviderStatus.NO_RESULTS,
+                    provider="cbm",
+                    diagnostic="Symbol or file not found in project graph.",
+                )
+
+        reconciled = reconcile_traceability_with_provider(self.tmp, graph, MockMissingProvider())
+        edge = reconciled[0]["edges"][0]
+        self.assertEqual(edge["verification_state"], "stale")
+        self.assertEqual(edge["confidence"], 0.0)
+
+    def test_provider_reconciliation_unavailable_preserves_historical_edge(self):
+        """When provider is unavailable, historical edge is preserved as unverified without hallucination."""
+        create_knowledge_record(
+            repo=self.tmp,
+            kind="decision",
+            title="Router System",
+            body="Architecture for router.",
+            authority="user_explicit",
+            evidence="Design doc",
+            scope=["src/router.py"],
+            accept=True,
+        )
+        graph = resolve_traceability_graph(self.tmp)
+
+        class MockUnavailableProvider:
+            def is_available(self):
+                return True
+
+            def name(self):
+                return "cbm"
+
+            def verify_reference(self, repo_path, path, symbol=None, relationship=None):
+                return ProviderResult(
+                    status=ProviderStatus.UNAVAILABLE,
+                    provider="cbm",
+                    diagnostic="Binary not found.",
+                )
+
+        reconciled = reconcile_traceability_with_provider(self.tmp, graph, MockUnavailableProvider())
+        edge = reconciled[0]["edges"][0]
+        self.assertEqual(edge["verification_state"], "unverified")
+        self.assertIn("unavailable", edge["evidence"])
+
+    def test_provider_interface_violation_raises_explicit_error(self):
+        """Provider missing verify_reference method must raise TypeError, NOT be silently swallowed!"""
+        create_knowledge_record(
+            repo=self.tmp,
+            kind="decision",
+            title="Router",
+            body="Router decision.",
+            authority="user_explicit",
+            evidence="Design doc",
+            scope=["src/router.py"],
+            accept=True,
+        )
+        graph = resolve_traceability_graph(self.tmp)
+
+        class BrokenProvider:
+            def is_available(self):
+                return True
+
+            def name(self):
+                return "broken"
+
+        with self.assertRaises(TypeError):
+            reconcile_traceability_with_provider(self.tmp, graph, BrokenProvider())
 
 
 if __name__ == "__main__":

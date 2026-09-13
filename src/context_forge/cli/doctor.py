@@ -138,9 +138,9 @@ def cmd_doctor(repo: Path) -> None:
         print(f"    binary path: {exe}")
         print(f"    version: {cbm_health.version or 'unknown'}")
         print("    transport: stdio / cli")
-        proj = cbm.resolve_project(repo)
-        if proj:
-            print(f"    indexed project: {proj}")
+        proj_name, proj_err = cbm.resolve_project(repo)
+        if proj_name:
+            print(f"    indexed project: {proj_name}")
         else:
             print("    indexed project: not resolved (unindexed - native fallback active)")
         caps_str = ", ".join(cbm_health.capabilities) if cbm_health.capabilities else "default"

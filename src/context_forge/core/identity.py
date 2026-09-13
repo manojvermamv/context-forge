@@ -21,7 +21,7 @@ def get_git_info(repo: Path) -> tuple[str, str, str]:
             branch = lines[1].strip() if len(lines) > 1 else ""
             toplevel = lines[2].strip() if len(lines) > 2 else ""
             return sha, branch, toplevel
-    except Exception:
+    except (subprocess.SubprocessError, OSError):
         pass
     return "", "", ""
 

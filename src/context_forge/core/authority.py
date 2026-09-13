@@ -221,16 +221,71 @@ class EpistemicAuthority:
             intent_item = claim_a if domain_a in (AuthorityDomain.INTENT, AuthorityDomain.POLICY) else claim_b
             exp_item = claim_b if intent_item is claim_a else claim_a
 
+            intent_text = (intent_item.get("body", "") + " " + intent_item.get("title", "")).lower()
+            exp_text = (exp_item.get("finding", "") + " " + exp_item.get("lesson", "") + " " + exp_item.get("title", "")).lower()
+
+            # Phase 1: Relevance check
+            intent_words = set(re.findall(r"\b[a-zA-Z0-9_-]{4,30}\b", intent_text))
+            exp_words = set(re.findall(r"\b[a-zA-Z0-9_-]{4,30}\b", exp_text))
+            stop_words = {"with", "that", "this", "from", "have", "will", "your", "must", "should", "could", "would"}
+            shared_topics = (intent_words & exp_words) - stop_words
+
+            # Phase 2: Contradiction check
+            advice_contradicts = False
+            for neg in ("rejected", "do not use", "forbidden", "disabled", "superseded", "avoid", "must not", "prohibited"):
+                if neg in intent_text:
+                    for w in shared_topics:
+                        if w in exp_text and any(k in exp_text for k in ("use", "try", "recommended", "adopt", "suggest")):
+                            advice_contradicts = True
+                            break
+
+            if not advice_contradicts:
+                for mandate in ("use ", "require", "mandatory", "standard is", "adopted"):
+                    if mandate in intent_text and any(k in exp_text for k in ("try ", "suggest", "use ", "recommend")):
+                        competing_pairs = [
+                            ({"rabbitmq", "rabbit"}, {"kafka"}),
+                            ({"postgresql", "postgres"}, {"mongo", "mongodb", "mysql", "sqlite"}),
+                            ({"redis"}, {"memcached"}),
+                            ({"threads", "threading"}, {"asyncio", "async"}),
+                        ]
+                        for group_a, group_b in competing_pairs:
+                            if any(ga in intent_text for ga in group_a) and any(gb in exp_text for gb in group_b):
+                                advice_contradicts = True
+                                break
+                            if any(gb in intent_text for gb in group_b) and any(ga in exp_text for ga in group_a):
+                                advice_contradicts = True
+                                break
+
+            if advice_contradicts:
+                return AuthorityResolution(
+                    disposition=ResolutionDisposition.ADVICE_REJECTED,
+                    domain_a=domain_a,
+                    domain_b=domain_b,
+                    claims_conflict=True,
+                    winner=intent_item.get("id"),
+                    preserved_claims=[intent_item],
+                    reason=f"Authoritative {intent_item.get('id')} dictates intent; contradictory experiential memory is subordinate advice.",
+                    evidence="Authoritative intent subordinates conflicting experiential advice.",
+                    reconciliation_required=False,
+                )
+
+            # Compatible or incomparable
+            if shared_topics or has_scope_overlap:
+                return AuthorityResolution(
+                    disposition=ResolutionDisposition.AGREES,
+                    domain_a=domain_a,
+                    domain_b=domain_b,
+                    claims_conflict=False,
+                    preserved_claims=[claim_a, claim_b],
+                    reason="Experiential finding is compatible with authoritative intent.",
+                )
             return AuthorityResolution(
-                disposition=ResolutionDisposition.ADVICE_REJECTED,
+                disposition=ResolutionDisposition.INCOMPARABLE,
                 domain_a=domain_a,
                 domain_b=domain_b,
-                claims_conflict=True,
-                winner=intent_item.get("id"),
-                preserved_claims=[intent_item],
-                reason=f"Authoritative {intent_item.get('id')} dictates intent; experiential memory is subordinate advice.",
-                evidence="Intent subordinates experiential finding.",
-                reconciliation_required=False,
+                claims_conflict=False,
+                preserved_claims=[claim_a, claim_b],
+                reason="Unrelated intent and experience domains.",
             )
 
         # 2. INTENT / POLICY vs IMPLEMENTATION
@@ -240,13 +295,16 @@ class EpistemicAuthority:
             code_item = claim_b if intent_item is claim_a else claim_a
             intent_domain = domain_a if intent_item is claim_a else domain_b
             code_text = text_b if intent_item is claim_a else text_a
+            intent_text = (intent_item.get("body", "") + " " + intent_item.get("title", "")).lower()
 
             is_violation = intent_domain == AuthorityDomain.POLICY
             disp = ResolutionDisposition.VIOLATION if is_violation else ResolutionDisposition.DRIFT
 
             # Check if code violates or bypasses intent/policy
-            violates = any(b in code_text for b in ("bypass", "skips", "missing", "violat", "omits", "without", "disables"))
-            if violates or has_scope_overlap:
+            violates = any(b in code_text for b in ("bypass", "skips", "missing", "violat", "omits", "without", "disables", "non-compliant", "breach"))
+            forbid_breached = any(f in intent_text for f in ("forbidden", "prohibited", "disallowed", "cannot", "must not")) and any(u in code_text for u in ("calls", "uses", "contains", "invokes"))
+
+            if violates or forbid_breached:
                 return AuthorityResolution(
                     disposition=disp,
                     domain_a=domain_a,
@@ -258,13 +316,25 @@ class EpistemicAuthority:
                     evidence=f"Code evidence shows divergence: {code_text[:120]}",
                     reconciliation_required=True,
                 )
+
+            # Implementation in same scope that does NOT violate: AGREES
+            if has_scope_overlap or any(t in code_text for t in re.findall(r"\b[a-zA-Z0-9_-]{4,30}\b", intent_text)):
+                return AuthorityResolution(
+                    disposition=ResolutionDisposition.AGREES,
+                    domain_a=domain_a,
+                    domain_b=domain_b,
+                    claims_conflict=False,
+                    preserved_claims=[claim_a, claim_b],
+                    reason="Implementation aligns with authoritative intent (no violation observed).",
+                )
+
             return AuthorityResolution(
-                disposition=ResolutionDisposition.AGREES,
+                disposition=ResolutionDisposition.INCOMPARABLE,
                 domain_a=domain_a,
                 domain_b=domain_b,
                 claims_conflict=False,
                 preserved_claims=[claim_a, claim_b],
-                reason="Implementation aligns with authoritative intent.",
+                reason="Unrelated intent and implementation scopes.",
             )
 
         # 3. IMPLEMENTATION vs IMPLEMENTATION
@@ -282,9 +352,10 @@ class EpistemicAuthority:
             live_a = claim_a.get("is_live", False) or (claim_a.get("authority") == "code_observed" and not claim_a.get("scope"))
             live_b = claim_b.get("is_live", False) or (claim_b.get("authority") == "code_observed" and not claim_b.get("scope"))
 
-            contradicts = any(term in text_a for term in ("removed", "deleted", "renamed", "deprecated", "async")) or \
-                          any(term in text_b for term in ("removed", "deleted", "renamed", "deprecated", "async"))
-            if contradicts:
+            # Contradiction signals for technical records: removed, deleted, renamed, deprecated (NO 'async'!)
+            contradicts = any(term in text_a for term in ("removed", "deleted", "renamed", "deprecated")) or \
+                          any(term in text_b for term in ("removed", "deleted", "renamed", "deprecated"))
+            if contradicts and has_scope_overlap:
                 winner = "current_code_evidence" if (live_a or live_b) else None
                 return AuthorityResolution(
                     disposition=ResolutionDisposition.RECORD_STALE if (live_a or live_b) else ResolutionDisposition.CONTRADICTED,

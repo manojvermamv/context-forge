@@ -15,6 +15,7 @@ from context_forge.compiler.allocator import allocate_context_budget
 from context_forge.compiler.pack import compile_context_pack
 from context_forge.cli.commands import cmd_init, cmd_context
 from context_forge.core.models import ContextPack
+from context_forge.providers.base import ProviderResult, ProviderStatus
 
 
 class TestContextCompilerAndBudget(unittest.TestCase):
@@ -139,6 +140,88 @@ class TestContextCompilerAndBudget(unittest.TestCase):
             out_json = json.loads(buf_json.getvalue())
             self.assertEqual(out_json["task"], "initialization task")
             self.assertIn("sections", out_json)
+
+    def test_production_compile_context_pack_obeys_budget_with_huge_diagnostics(self) -> None:
+        """Production compile_context_pack must strictly obey budget even with huge provider diagnostics."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            cmd_init(repo)
+
+            from context_forge.knowledge.update import create_knowledge_record
+            # Create a mandatory policy and a requirement
+            create_knowledge_record(
+                repo=repo,
+                kind="policy",
+                title="Security Gateway Mandate",
+                body="All external inbound payloads must pass through RiskGateway before execution." * 5,
+                authority="policy_mandate",
+                evidence="Statutory regulatory mandate",
+                scope=["src/gateway.py"],
+                accept=True,
+            )
+
+            # Create source files
+            (repo / "src").mkdir(parents=True, exist_ok=True)
+            (repo / "src" / "gateway.py").write_text(
+                "# Bypasses RiskGateway directly for benchmark test\nclass DirectBroker: pass\n",
+                encoding="utf-8",
+            )
+
+            budget = 1800
+
+            # Mock CBM returning huge diagnostic (5,000 chars)
+            class HugeDiagCBM:
+                def is_available(self):
+                    return True
+                def query_impact_result(self, repo_path, query="", paths=None, scope_paths=None, **kwargs):
+                    return ProviderResult(
+                        status=ProviderStatus.DEGRADED,
+                        provider="codebase_memory_mcp",
+                        data=[{"symbol": "DirectBroker", "path": "src/gateway.py", "details": "Bypasses RiskGateway directly without checks"}],
+                        diagnostic="CBM_VERBOSE_DUMP_" + ("X" * 4000),
+                        diagnostic_message="CBM_VERBOSE_DUMP_" + ("X" * 4000),
+                    )
+
+            # Mock AgentMemory returning huge diagnostic (3,000 chars)
+            class HugeDiagAM:
+                def is_available(self):
+                    return True
+                def recall_lessons_result(self, query, limit=4):
+                    return ProviderResult(
+                        status=ProviderStatus.OK,
+                        provider="agentmemory",
+                        data=[{"finding": "Historical lesson: gateway routing advice " + ("Y" * 300), "source": "agentmemory"}],
+                        diagnostic="AGENTMEMORY_VERBOSE_DUMP_" + ("Z" * 3000),
+                        diagnostic_message="AGENTMEMORY_VERBOSE_DUMP_" + ("Z" * 3000),
+                    )
+
+            with patch("context_forge.compiler.pack.CodebaseMemoryMCPProvider", HugeDiagCBM), \
+                 patch("context_forge.compiler.pack.AgentMemoryProvider", HugeDiagAM):
+                pack = compile_context_pack(
+                    repo,
+                    task_query="Security Gateway verification",
+                    paths=["src/gateway.py"],
+                    budget_chars=budget,
+                )
+
+                rendered = pack.to_text()
+                # Total rendered text must strictly obey configured budget
+                self.assertLessEqual(
+                    len(rendered),
+                    budget,
+                    f"Rendered context pack exceeded budget: {len(rendered)} > {budget}",
+                )
+
+                # Critical VIOLATION or DRIFT must be preserved as highest priority
+                self.assertTrue(
+                    "VIOLATION" in rendered or "DRIFT" in rendered,
+                    "Critical conflict/violation must survive budget trimming",
+                )
+
+                # Structured JSON representation must remain valid
+                as_dict = pack.to_dict()
+                self.assertIn("sections", as_dict)
+                self.assertLessEqual(pack.total_chars, budget)
 
 
 if __name__ == "__main__":

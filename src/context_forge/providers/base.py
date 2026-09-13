@@ -108,14 +108,46 @@ class CodeIntelligenceProvider(ABC):
         """Return codebase structure and key symbols."""
         pass
 
-    def query_impact(self, query: str, paths: list[str]) -> list[dict[str, Any]]:
+    def query_impact(
+        self,
+        repo_path: Path | str,
+        query: str,
+        paths: Optional[list[str]] = None,
+        scope_paths: Optional[list[str]] = None,
+        **kwargs: Any,
+    ) -> list[dict[str, Any]]:
         """Query symbols, callers, and impact for a task (backward-compatible list)."""
-        res = self.query_impact_result(query, paths)
+        res = self.query_impact_result(repo_path, query, paths=paths, scope_paths=scope_paths, **kwargs)
         return list(res.data) if isinstance(res.data, list) else []
 
     @abstractmethod
-    def query_impact_result(self, query: str, paths: list[str]) -> ProviderResult:
-        """Query symbols, callers, and impact returning structured ProviderResult."""
+    def query_impact_result(
+        self,
+        repo_path: Path | str,
+        query: str,
+        paths: Optional[list[str]] = None,
+        scope_paths: Optional[list[str]] = None,
+        **kwargs: Any,
+    ) -> ProviderResult:
+        """Query symbols, callers, and impact returning structured ProviderResult.
+        
+        Args:
+            repo_path: Explicit filesystem root of target repository.
+            query: Task query string.
+            paths: Optional list of relevant scope paths.
+            scope_paths: Optional alias for paths.
+        """
+        pass
+
+    @abstractmethod
+    def verify_reference(
+        self,
+        repo_path: Path | str,
+        path: str,
+        symbol: Optional[str] = None,
+        relationship: Optional[str] = None,
+    ) -> ProviderResult:
+        """Verify structural presence of a target file, symbol, or relationship."""
         pass
 
 

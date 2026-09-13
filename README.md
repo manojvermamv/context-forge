@@ -317,7 +317,25 @@ Every code-observed fact (`TECH`, `TRACE`, scan records) is anchored to a full 4
 
 All repository mutations (`update`, `approval`, `candidate`, `sync`, `consolidate`, `supersession`) are protected by a cross-process reentrant lock (`repo_lock`) using atomic filesystem semantics with automatic stale-lock reclamation. Record ID allocation (`REQ-xxx`, `ADR-xxx`, etc.) and canonical file writes are atomic, preventing collision under concurrent multi-agent executions. Audit logging operates in true append mode under lock.
 
-*Boundary Note: Local filesystem locking guarantees safe concurrency across local processes and subagents; shared network filesystems (e.g. NFS/SMB) without POSIX `O_EXCL` guarantees require single-host execution.*
+Key concurrency invariants:
+- **Live owner never stolen:** A lock held by a confirmed alive local PID is NEVER stolen, regardless of lock age.
+- **Dead owner safely reclaimed:** Stale locks from terminated/crashed processes are reclaimed safely.
+- **Concurrency boundary:** Guarantees safe local-process and subagent coordination on a single host. Context Forge does not claim distributed transactional safety over multi-host network filesystems (e.g. NFS/SMB).
+
+## Federated Providers & Verification Levels
+
+Context Forge supports optional integration with specialized external intelligence providers while maintaining a dependency-free native fallback:
+
+- **Codebase-Memory-MCP (CBM)** [Code Intelligence Plane]: Call graphs, symbols, impact analysis, and trace verification.
+  - *Contract tests:* PASS (typed CLI arguments, repository root plumbing, reference verification, failure handling).
+  - *Live health:* SKIPPED (opt-in via `RUN_CBM_LIVE_TESTS=1`).
+  - *Live E2E:* SKIPPED (opt-in via `RUN_CBM_LIVE_TESTS=1`).
+- **AgentMemory** [Agent Experience Plane]: Cross-session lessons, procedural memory, and smart search.
+  - *Contract tests:* PASS (HTTP contract validation, health structure validation, unauthorized/timeout handling).
+  - *Live health:* SKIPPED (opt-in via `RUN_AGENTMEMORY_LIVE_TESTS=1`).
+  - *Live E2E:* SKIPPED (opt-in via `RUN_AGENTMEMORY_LIVE_TESTS=1`).
+- **Native Mode (Fallback)**: Zero-dependency standard library implementation (regex/AST symbol scanning, local session log).
+  - *Mode distinction:* Native mode is a functional degraded mode providing path/symbol heuristic coverage; it is not feature-equivalent to CBM's structural graph intelligence.
 
 ## Verify the Installation & Run Evaluations
 

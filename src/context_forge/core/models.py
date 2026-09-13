@@ -261,16 +261,22 @@ class KnowledgeRecord:
         ev = self.evidence
         if ev.source_type:
             fm_lines.append(f"evidence_source_type: {ev.source_type}")
+        if ev.authority_level:
+            fm_lines.append(f"evidence_authority_level: {ev.authority_level}")
         if ev.observed_commit:
             fm_lines.append(f"evidence_observed_commit: {ev.observed_commit}")
         if ev.digest:
             fm_lines.append(f"evidence_digest: {ev.digest}")
         if ev.producer:
             fm_lines.append(f"evidence_producer: {ev.producer}")
+        if ev.contains_redactions:
+            fm_lines.append("evidence_contains_redactions: true")
         if ev.verification_state:
             fm_lines.append(f"evidence_verification_state: {ev.verification_state}")
         if ev.verified_at:
             fm_lines.append(f"evidence_verified_at: {ev.verified_at}")
+        if ev.created_at:
+            fm_lines.append(f"evidence_created_at: {ev.created_at}")
         if ev.source_refs:
             fm_lines.append("evidence_source_refs:")
             for sref in ev.source_refs:
@@ -298,9 +304,10 @@ class KnowledgeRecord:
             "agent_role", "session_id", "conversation_id", "task_id", "checkpoint_id",
             "producer", "producer_type", "producer_id", "producer_version", "reviewer",
             "harness", "model_provider", "model_id", "authority_domain", "authority_level",
-            "observed_at", "evidence_source_type", "evidence_observed_commit",
-            "evidence_digest", "evidence_producer", "evidence_verification_state",
-            "evidence_verified_at", "evidence_source_refs", "scope", "affected_symbols", "affected_tests"
+            "observed_at", "evidence_source_type", "evidence_authority_level", "evidence_observed_commit",
+            "evidence_digest", "evidence_producer", "evidence_contains_redactions", "contains_redactions",
+            "evidence_verification_state", "evidence_verified_at", "evidence_created_at", "evidence_observed_at",
+            "evidence_source_refs", "scope", "affected_symbols", "affected_tests"
         }
         for k, v in sorted(self.extra_frontmatter.items()):
             if k not in known_keys:

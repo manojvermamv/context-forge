@@ -167,15 +167,81 @@ class NativeCodeProvider(CodeIntelligenceProvider):
     def get_symbol_map(self, repo_path: str) -> str:
         return build_code_map(Path(repo_path))
 
-    def query_impact_result(self, query: str, paths: list[str]) -> ProviderResult:
+    def query_impact_result(
+        self,
+        repo_path: Path | str,
+        query: str = "",
+        paths: Optional[list[str]] = None,
+        scope_paths: Optional[list[str]] = None,
+        **kwargs: Any,
+    ) -> ProviderResult:
+        # Handle backward-compatible positional argument swap if query was passed as repo_path
+        actual_scope = scope_paths if scope_paths is not None else (paths or [])
+        if isinstance(query, list) and not actual_scope:
+            actual_scope = query
+
         results = []
-        for p in paths:
+        for p in actual_scope:
             results.append({"path": p, "details": "Directly specified in task scope."})
         status = ProviderStatus.OK if results else ProviderStatus.NO_RESULTS
         return ProviderResult(
             status=status,
             provider=self.name(),
             data=results,
-            diagnostic=f"Native scope mapping for {len(paths)} paths.",
+            diagnostic=f"Native scope mapping for {len(actual_scope)} paths.",
+        )
+
+    def verify_reference(
+        self,
+        repo_path: Path | str,
+        path: str,
+        symbol: Optional[str] = None,
+        relationship: Optional[str] = None,
+    ) -> ProviderResult:
+        """Verify presence of file or symbol in repository using native scanning."""
+        target = Path(repo_path) / path
+        if not target.exists():
+            return ProviderResult(
+                status=ProviderStatus.NO_RESULTS,
+                provider=self.name(),
+                diagnostic=f"Native verification: file '{path}' not found on disk.",
+            )
+
+        if symbol:
+            try:
+                content = target.read_text(encoding="utf-8", errors="ignore")
+                lang = CODE_EXT_LANG.get(target.suffix, "other")
+                pat = SYMBOL_PATTERNS.get(lang)
+                if pat:
+                    for line in content.splitlines():
+                        m = pat.match(line)
+                        if m and any(g == symbol for g in m.groups() if g):
+                            return ProviderResult(
+                                status=ProviderStatus.OK,
+                                provider=self.name(),
+                                data={"path": path, "symbol": symbol},
+                                diagnostic=f"Native verification: symbol '{symbol}' found in '{path}'.",
+                            )
+                if symbol in content:
+                    return ProviderResult(
+                        status=ProviderStatus.OK,
+                        provider=self.name(),
+                        data={"path": path, "symbol": symbol},
+                        diagnostic=f"Native verification: symbol '{symbol}' matched in '{path}'.",
+                    )
+            except OSError:
+                pass
+
+            return ProviderResult(
+                status=ProviderStatus.NO_RESULTS,
+                provider=self.name(),
+                diagnostic=f"Native verification: symbol '{symbol}' not found in '{path}'.",
+            )
+
+        return ProviderResult(
+            status=ProviderStatus.OK,
+            provider=self.name(),
+            data={"path": path},
+            diagnostic=f"Native verification: file '{path}' exists.",
         )
 

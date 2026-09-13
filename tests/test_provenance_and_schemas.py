@@ -238,6 +238,107 @@ Customer database performance review.
         pack_schema = load_schema("context-pack.schema.json")
         validate_json_schema(pack.to_dict(), pack_schema)
 
+    def test_adversarial_evidence_roundtrip_independent_of_identity(self) -> None:
+        """Adversarial test: evidence authority != identity authority, distinct timestamps,
+        contains_redactions=True, and verification_state=verified must all survive round-trip distinctly."""
+        ident = IdentityEnvelope(
+            schema_version="2.0",
+            project_id="adversarial-proj",
+            authority_domain="POLICY",
+            authority_level=95,
+            created_at="2026-09-10T08:00:00Z",
+            observed_at="2026-09-10T08:00:00Z",
+        )
+
+        ev = EvidenceStatement(
+            statement="Independent benchmark report showing latency regression.",
+            authority_level=55,
+            source_type="benchmark_run",
+            source_refs=["benchmarks/run_99.json"],
+            contains_redactions=True,
+            digest="sha256:1122334455667788",
+            observed_commit="b" * 40,
+            producer="perf-harness",
+            verification_state="verified",
+            verified_at="2026-09-12T15:30:00Z",
+            created_at="2026-09-12T15:00:00Z",
+        )
+
+        record = KnowledgeRecord(
+            id="POL-099",
+            kind="policy",
+            title="Adversarial Evidence Decoupling Policy",
+            status="accepted",
+            authority="policy_mandate",
+            updated="2026-09-13",
+            created_at="2026-09-10T08:00:00Z",
+            body="Policy statement with independent evidence.",
+            evidence=ev,
+            identity=ident,
+            scope=["benchmarks/run_99.json"],
+        )
+
+        md_text = serialize_markdown_record(record)
+        self.assertIn("authority_level: 95", md_text)
+        self.assertIn("evidence_authority_level: 55", md_text)
+        self.assertIn("evidence_contains_redactions: true", md_text)
+
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir) / "POL-099-adversarial.md"
+            tmp_path.write_text(md_text, encoding="utf-8")
+            parsed = parse_markdown_record(tmp_path, Path(tmpdir))
+
+            # Identity envelope authority
+            self.assertEqual(parsed.identity.authority_level, 95)
+            self.assertEqual(parsed.identity.created_at, "2026-09-10T08:00:00Z")
+
+            # Evidence authority must be 55, NOT 95!
+            self.assertEqual(parsed.evidence.authority_level, 55)
+            self.assertNotEqual(parsed.evidence.authority_level, parsed.identity.authority_level)
+
+            # Timestamps must remain distinct
+            self.assertEqual(parsed.evidence.created_at, "2026-09-12T15:00:00Z")
+            self.assertEqual(parsed.evidence.verified_at, "2026-09-12T15:30:00Z")
+            self.assertNotEqual(parsed.identity.created_at, parsed.evidence.created_at)
+
+            # Redactions and verification state
+            self.assertTrue(parsed.evidence.contains_redactions)
+            self.assertEqual(parsed.evidence.verification_state, "verified")
+            self.assertEqual(parsed.evidence.digest, "sha256:1122334455667788")
+            self.assertEqual(parsed.evidence.producer, "perf-harness")
+
+    def test_legacy_record_does_not_copy_identity_authority_to_evidence(self) -> None:
+        """Legacy records without explicit evidence_authority_level must retain default 0,
+        and not inherit identity.authority_level."""
+        legacy_md = """---
+id: REQ-050
+status: accepted
+authority: user_explicit
+authority_level: 90
+updated: 2026-01-01
+---
+
+# High Security Requirement
+
+## Details
+
+High security is required.
+
+## Evidence
+
+Internal security checklist.
+"""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Path(tmpdir) / "REQ-050-security.md"
+            p.write_text(legacy_md, encoding="utf-8")
+            rec = parse_markdown_record(p, Path(tmpdir))
+
+            self.assertEqual(rec.identity.authority_level, 90)
+            # Evidence authority must be safe default (0), not silently copy identity authority 90!
+            self.assertEqual(rec.evidence.authority_level, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

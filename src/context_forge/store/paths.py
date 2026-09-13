@@ -64,7 +64,7 @@ def read_text(path: Path, default: str = "") -> str:
 def read_json(path: Path, default: Any = None) -> Any:
     try:
         return json.loads(read_text(path, ""))
-    except Exception:
+    except (json.JSONDecodeError, UnicodeDecodeError):
         return default
 
 

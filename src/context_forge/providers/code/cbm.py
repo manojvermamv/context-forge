@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -21,7 +22,7 @@ def normalize_repo_path(p: Path | str) -> str:
         if os.name == "nt" or sys.platform == "win32":
             norm = norm.lower()
         return norm
-    except Exception:
+    except (OSError, RuntimeError):
         return str(p).replace("\\", "/").rstrip("/").lower()
 
 
@@ -167,7 +168,7 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
                 out = res.stdout.strip()
                 try:
                     parsed = json.loads(out)
-                except Exception:
+                except (json.JSONDecodeError, UnicodeDecodeError):
                     parsed = out
                 return ProviderResult(
                     status=ProviderStatus.OK,
@@ -264,7 +265,14 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
             return json.dumps(res.data, indent=2)
         return ""
 
-    def query_impact_result(self, query: str, paths: list[str]) -> ProviderResult:
+    def query_impact_result(
+        self,
+        repo_path: Path | str,
+        query: str = "",
+        paths: Optional[list[str]] = None,
+        scope_paths: Optional[list[str]] = None,
+        **kwargs: Any,
+    ) -> ProviderResult:
         """Query code intelligence symbols and impact using CBM CLI with resolved project identity."""
         exe = self._resolve_executable()
         if not exe:
@@ -276,8 +284,18 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
                 diagnostic="codebase-memory-mcp binary not found; native code mapper used.",
             )
 
-        repo_target = paths[0] if paths else "."
-        project_name, err = self.resolve_project(repo_target)
+        # Handle backward-compatible positional argument swap if query was passed as repo_path
+        actual_repo = repo_path
+        actual_query = query
+        actual_scope = scope_paths if scope_paths is not None else (paths or [])
+
+        # If repo_path is a query string without path separators and doesn't exist, and query is a list
+        if isinstance(query, list) and not actual_scope:
+            actual_scope = query
+            actual_query = str(repo_path)
+            actual_repo = kwargs.get("repo", ".")
+
+        project_name, err = self.resolve_project(actual_repo)
         if err is not None:
             return err
 
@@ -286,8 +304,8 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
             "search_graph",
             {
                 "project": project_name,
-                "query": query,
-                "name_pattern": f".*{query}.*" if query else ".*",
+                "query": actual_query,
+                "name_pattern": f".*{actual_query}.*" if actual_query else ".*",
                 "limit": 40,
             },
         )
@@ -295,7 +313,7 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
             # Fallback to search_code
             res = self.run_tool(
                 "search_code",
-                {"project": project_name, "query": query, "limit": 20},
+                {"project": project_name, "query": actual_query, "limit": 20},
             )
             if not res.is_ok():
                 return res
@@ -322,7 +340,7 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
                 provider=self.name(),
                 data=[],
                 project_name=project_name or "",
-                diagnostic=f"CBM found no structural symbols matching '{query}' in project '{project_name}'.",
+                diagnostic=f"CBM found no structural symbols matching '{actual_query}' in project '{project_name}'.",
             )
 
         return ProviderResult(
@@ -331,6 +349,102 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
             data=mapped,
             project_name=project_name or "",
             diagnostic=f"Retrieved {len(mapped)} symbols from CBM project '{project_name}'.",
+        )
+
+    def verify_reference(
+        self,
+        repo_path: Path | str,
+        path: str,
+        symbol: Optional[str] = None,
+        relationship: Optional[str] = None,
+    ) -> ProviderResult:
+        """Verify structural presence of a target file, symbol, or relationship using CBM CLI."""
+        exe = self._resolve_executable()
+        if not exe:
+            return ProviderResult(
+                status=ProviderStatus.UNAVAILABLE,
+                provider=self.name(),
+                diagnostic_code="CBM_UNAVAILABLE",
+                diagnostic="codebase-memory-mcp binary not found.",
+            )
+
+        project_name, err = self.resolve_project(repo_path)
+        if err is not None:
+            return err
+
+        # If a symbol is specified, search for the symbol in the project graph
+        if symbol:
+            res = self.run_tool(
+                "search_graph",
+                {
+                    "project": project_name,
+                    "query": symbol,
+                    "name_pattern": f"^{re.escape(symbol)}$",
+                    "limit": 10,
+                },
+            )
+            if not res.is_ok():
+                res = self.run_tool(
+                    "search_code",
+                    {"project": project_name, "query": symbol, "limit": 10},
+                )
+            if not res.is_ok():
+                return res
+
+            raw_data = res.data
+            nodes = raw_data if isinstance(raw_data, list) else (raw_data.get("results") or raw_data.get("nodes") or []) if isinstance(raw_data, dict) else []
+            if nodes:
+                return ProviderResult(
+                    status=ProviderStatus.OK,
+                    provider=self.name(),
+                    project_name=project_name,
+                    data={"symbol": symbol, "path": path, "nodes": nodes},
+                    diagnostic=f"Symbol '{symbol}' verified in CBM project '{project_name}'.",
+                )
+            return ProviderResult(
+                status=ProviderStatus.NO_RESULTS,
+                provider=self.name(),
+                project_name=project_name,
+                diagnostic=f"Symbol '{symbol}' not found in CBM project '{project_name}'.",
+            )
+
+        # If path is specified without symbol, search code in CBM or check disk
+        if path:
+            norm_path = path.replace("\\", "/")
+            res = self.run_tool(
+                "search_code",
+                {"project": project_name, "query": norm_path, "limit": 10},
+            )
+            if res.is_ok() and res.data:
+                return ProviderResult(
+                    status=ProviderStatus.OK,
+                    provider=self.name(),
+                    project_name=project_name,
+                    data={"path": path, "matches": res.data},
+                    diagnostic=f"Path '{path}' verified in CBM project '{project_name}'.",
+                )
+            # Check if file exists on disk inside repo_path
+            p = Path(repo_path) / path
+            if p.exists():
+                return ProviderResult(
+                    status=ProviderStatus.OK,
+                    provider=self.name(),
+                    project_name=project_name,
+                    data={"path": path},
+                    diagnostic=f"Path '{path}' confirmed on disk in repository.",
+                )
+            return ProviderResult(
+                status=ProviderStatus.NO_RESULTS,
+                provider=self.name(),
+                project_name=project_name,
+                diagnostic=f"Reference '{path}' not found in CBM graph or repository.",
+            )
+
+        return ProviderResult(
+            status=ProviderStatus.NO_RESULTS,
+            provider=self.name(),
+            project_name=project_name,
+            diagnostic="Neither symbol nor path provided for reference verification.",
         )
 
 

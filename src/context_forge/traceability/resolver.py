@@ -144,44 +144,69 @@ def resolve_traceability_graph(repo: Path) -> list[dict[str, Any]]:
     return graph
 
 
+from context_forge.providers.base import ProviderStatus
+
+
 def reconcile_traceability_with_provider(
     repo: Path,
     graph: list[dict[str, Any]],
+    provider: Optional[Any] = None,
     cbm_provider: Optional[Any] = None,
 ) -> list[dict[str, Any]]:
     """Reconcile traceability edges against external code intelligence when available.
     
-    If CBM is available and verified:
+    If provider is available and verified:
         strengthen edge confidence and mark verified.
-    If CBM indicates entity missing:
+    If provider indicates entity missing:
         mark edge stale/contradicted.
-    If provider unavailable:
-        preserve historical edge and keep native unverified state.
+    If provider is unavailable or unindexed:
+        preserve historical edge and keep native unverified state with honest diagnostic.
     """
-    if cbm_provider is None or not getattr(cbm_provider, "is_available", lambda: False)():
+    prov = provider if provider is not None else cbm_provider
+    if prov is None or not getattr(prov, "is_available", lambda: False)():
         return graph
+
+    provider_name = getattr(prov, "name", lambda: "provider")()
 
     for entry in graph:
         for edge in entry.get("edges", []):
             target_ref = edge.get("target_ref", "")
-            target_path = repo / target_ref
-            if not target_path.exists():
-                edge["verification_state"] = "stale"
-                edge["confidence"] = 0.0
-                edge["evidence"] = "CBM reconciliation: target file not found on disk."
-                continue
+            symbol = edge.get("symbol")
+            relationship = edge.get("relationship")
+
+            if not hasattr(prov, "verify_reference"):
+                raise TypeError(
+                    f"Provider '{provider_name}' violates CodeIntelligenceProvider contract: "
+                    f"missing required method 'verify_reference'"
+                )
 
             try:
-                # Query CBM for structural presence
-                res = cbm_provider.query_code_intelligence(repo, query=target_path.stem)
-                if res.status.value == "ok" and res.data:
-                    edge["provider"] = "cbm"
-                    edge["confidence"] = 0.95
-                    edge["verification_state"] = "verified"
-                    edge["last_verified_at"] = now_iso()
-                    edge["evidence"] = "Structural relationship confirmed via CBM graph analysis."
-            except Exception:
-                # Provider error does not erase edge
+                res = prov.verify_reference(
+                    repo_path=repo,
+                    path=target_ref,
+                    symbol=symbol,
+                    relationship=relationship,
+                )
+            except (TimeoutError, OSError) as exc:
                 edge["verification_state"] = "unverified"
+                edge["evidence"] = f"Provider '{provider_name}' runtime communication failure: {exc}"
+                continue
+
+            if res.is_ok() and res.data:
+                edge["provider"] = provider_name
+                edge["confidence"] = 0.95
+                edge["verification_state"] = "verified"
+                edge["last_verified_at"] = now_iso()
+                edge["evidence"] = res.diagnostic or f"Structural relationship confirmed via {provider_name}."
+            elif res.status == ProviderStatus.NO_RESULTS:
+                edge["verification_state"] = "stale"
+                edge["confidence"] = 0.0
+                edge["evidence"] = res.diagnostic or f"Reference '{target_ref}' missing in {provider_name}."
+            elif res.status in (ProviderStatus.UNAVAILABLE, ProviderStatus.UNINDEXED):
+                edge["verification_state"] = "unverified"
+                edge["evidence"] = f"{provider_name} {res.status.value}: historical edge preserved."
+            else:
+                edge["verification_state"] = "unverified"
+                edge["evidence"] = res.diagnostic or f"{provider_name} returned status '{res.status.value}'."
 
     return graph

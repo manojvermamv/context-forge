@@ -120,7 +120,7 @@ class ConflictResolver:
                 fact_text = (fact.get("details", "") + " " + fact.get("finding", "")).lower()
                 fact_path = fact.get("path", "")
                 if fact_path and fact_path in tech_paths:
-                    if any(w in fact_text for w in ("removed", "renamed", "deprecated", "deleted", "async")):
+                    if any(w in fact_text for w in ("removed", "renamed", "deprecated", "deleted")):
                         stale_records.append({
                             "type": "RECORD_STALE",
                             "disposition": ResolutionDisposition.RECORD_STALE.value,

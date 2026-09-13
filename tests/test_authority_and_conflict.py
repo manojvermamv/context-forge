@@ -177,5 +177,83 @@ class AuthorityAndConflictTestCase(unittest.TestCase):
         self.assertIn("authority: policy_mandate", text)
 
 
+    def test_same_scope_compatible_claims_do_not_drift(self):
+        """Scope overlap without contradiction must NOT produce DRIFT (e.g. RiskGate uses async I/O)."""
+        intent = {
+            "id": "ADR-014",
+            "kind": "decision",
+            "authority": "user_explicit",
+            "title": "RiskGate is mandatory",
+            "body": "RiskGate component is mandatory for order validation.",
+            "scope": ["src/risk.py"],
+        }
+        impl = {
+            "path": "src/risk.py",
+            "symbol": "RiskGate",
+            "kind": "technical",
+            "authority": "code_observed",
+            "details": "RiskGate implementation now uses async I/O for network lookups.",
+        }
+        res = EpistemicAuthority.resolve_claims(intent, impl)
+        self.assertFalse(res.claims_conflict, "Compatible implementation in same scope must not conflict")
+        self.assertEqual(res.disposition, ResolutionDisposition.AGREES)
+
+    def test_unrelated_experience_does_not_trigger_advice_rejected(self):
+        """Unrelated experience finding does not become ADVICE_REJECTED conflict."""
+        intent = {
+            "id": "ADR-001",
+            "kind": "decision",
+            "authority": "user_explicit",
+            "title": "Use PostgreSQL",
+            "body": "PostgreSQL required for persistent storage.",
+        }
+        exp = {
+            "source": "agentmemory",
+            "authority": "procedural_memory",
+            "finding": "Docker was unavailable during previous CI run",
+        }
+        res = EpistemicAuthority.resolve_claims(intent, exp)
+        self.assertFalse(res.claims_conflict, "Unrelated experience must not produce conflict")
+        self.assertNotEqual(res.disposition, ResolutionDisposition.ADVICE_REJECTED)
+
+    def test_technical_records_agree_when_not_removed(self):
+        """Two technical facts on the same file agree unless one explicitly removes/deprecates."""
+        tech1 = {
+            "id": "TECH-001",
+            "kind": "technical",
+            "authority": "code_observed",
+            "path": "src/worker.py",
+            "scope": ["src/worker.py"],
+            "details": "Worker pool initializes with 4 threads.",
+        }
+        tech2 = {
+            "id": "TECH-002",
+            "kind": "technical",
+            "authority": "code_observed",
+            "path": "src/worker.py",
+            "scope": ["src/worker.py"],
+            "details": "Worker pool uses FIFO queue.",
+        }
+        res = EpistemicAuthority.resolve_claims(tech1, tech2)
+        self.assertFalse(res.claims_conflict)
+        self.assertEqual(res.disposition, ResolutionDisposition.AGREES)
+
+    def test_async_code_does_not_falsely_mark_technical_record_stale(self):
+        """Using 'async' in code observation does NOT falsely trigger RECORD_STALE."""
+        tech = {
+            "id": "TECH-003",
+            "kind": "technical",
+            "authority": "code_observed",
+            "scope": ["src/worker.py"],
+            "details": "Async order processor.",
+        }
+        fact = {
+            "path": "src/worker.py",
+            "details": "Worker now exposes async execute_task method.",
+        }
+        stales = ConflictResolver.detect_stale_records([tech], [fact])
+        self.assertEqual(len(stales), 0, "Async code must not be treated as a stale contradiction keyword")
+
+
 if __name__ == "__main__":
     unittest.main()

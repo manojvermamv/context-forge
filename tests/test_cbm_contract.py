@@ -74,12 +74,79 @@ class TestCBMContract(unittest.TestCase):
             self.assertIsNone(err)
             self.assertEqual(proj_name, "my-project-id")
 
-            # Query impact passing target repo
-            impact_res = cbm.query_impact_result("AuthService", [str(repo_dir)])
+            # Query impact passing repo_path explicitly, distinct from scope_paths
+            impact_res = cbm.query_impact_result(repo_path=repo_dir, query="AuthService", scope_paths=["src/auth.py"])
             self.assertEqual(impact_res.status, ProviderStatus.OK)
             self.assertEqual(impact_res.project_name, "my-project-id")
             self.assertEqual(len(impact_res.data), 1)
             self.assertEqual(impact_res.data[0]["symbol"], "AuthService")
+
+            # Verify verify_reference contract on CBM
+            ref_res = cbm.verify_reference(repo_path=repo_dir, path="src/auth.py", symbol="AuthService")
+            self.assertEqual(ref_res.status, ProviderStatus.OK)
+            self.assertEqual(ref_res.data["symbol"], "AuthService")
+
+    def test_cbm_root_plumbing_distinct_from_scope_paths(self) -> None:
+        """Adversarial test: repository root != cwd, scope_paths contains relative and absolute files."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            repo_root = tmp_dir / "my_actual_repo"
+            repo_root.mkdir()
+            (repo_root / "src").mkdir()
+            rel_file = "src/payment.py"
+            abs_file = str((repo_root / "src" / "worker.py").resolve())
+
+            runner = tmp_dir / "cbm_runner.py"
+            runner.write_text(
+                'import sys, json, os\n'
+                'if "--version" in sys.argv:\n'
+                '    print("0.10.8")\n'
+                'elif len(sys.argv) >= 3 and sys.argv[1] == "cli":\n'
+                '    tool = sys.argv[2]\n'
+                '    args = json.loads(sys.argv[3]) if len(sys.argv) > 3 else {}\n'
+                '    if tool == "list_projects":\n'
+                f'        print(json.dumps([{{\n'
+                f'            "name": "my-actual-repo-id",\n'
+                f'            "root_path": "{str(repo_root.resolve()).replace(chr(92), "/")}",\n'
+                f'        }}]))\n'
+                '    elif tool == "search_graph":\n'
+                '        assert args.get("project") == "my-actual-repo-id", f"Expected my-actual-repo-id, got {args.get(\'project\')}"\n'
+                '        print(json.dumps([{"name": "PaymentEngine", "path": "src/payment.py", "signature": "class PaymentEngine"}]))\n'
+                '    else:\n'
+                '        print(json.dumps([]))\n',
+                encoding="utf-8",
+            )
+
+            if sys.platform == "win32":
+                mock_exe = tmp_dir / "mock_cbm.bat"
+                mock_exe.write_text(f'@echo off\n"{sys.executable}" "{runner}" %*\n', encoding="utf-8")
+            else:
+                mock_exe = tmp_dir / "mock_cbm"
+                mock_exe.write_text(f'#!/bin/sh\n"{sys.executable}" "{runner}" "$@"\n', encoding="utf-8")
+                mock_exe.chmod(mock_exe.stat().st_mode | stat.S_IEXEC)
+
+            cbm = CodebaseMemoryMCPProvider(executable_path=str(mock_exe))
+
+            # Case A: scope_paths contains relative and absolute files, repo_root is distinct
+            res_a = cbm.query_impact_result(
+                repo_path=repo_root,
+                query="PaymentEngine",
+                scope_paths=[rel_file, abs_file],
+            )
+            self.assertEqual(res_a.status, ProviderStatus.OK)
+            self.assertEqual(res_a.project_name, "my-actual-repo-id")
+
+            # Case B: scope_paths is empty
+            res_b = cbm.query_impact_result(
+                repo_path=repo_root,
+                query="PaymentEngine",
+                scope_paths=[],
+            )
+            self.assertEqual(res_b.status, ProviderStatus.OK)
+
+            # Case C: verify_reference on repo_root
+            ref_res = cbm.verify_reference(repo_path=repo_root, path="src/payment.py", symbol="PaymentEngine")
+            self.assertEqual(ref_res.status, ProviderStatus.OK)
 
     def test_unindexed_repo_returns_unindexed_status(self) -> None:
         """Verify unindexed repo returns UNINDEXED without crashing."""
@@ -132,8 +199,8 @@ class TestCBMContract(unittest.TestCase):
             self.assertEqual(res.status, ProviderStatus.ERROR)
             self.assertIn("Fatal crash", res.diagnostic)
 
-    def test_live_cbm_provider_opt_in(self) -> None:
-        """Opt-in live CBM integration test (RUN_CBM_LIVE_TESTS=1)."""
+    def test_live_cbm_health_opt_in(self) -> None:
+        """Opt-in live CBM health test (RUN_CBM_LIVE_TESTS=1)."""
         if os.environ.get("RUN_CBM_LIVE_TESTS") != "1":
             self.skipTest("Live CBM tests not enabled. Set RUN_CBM_LIVE_TESTS=1 to run.")
 
@@ -143,6 +210,25 @@ class TestCBMContract(unittest.TestCase):
             self.skipTest(f"Live CBM binary not available or healthy: {health.diagnostic}")
 
         self.assertTrue(health.version != "", "Live CBM must report a version")
+
+    def test_live_cbm_e2e_query_opt_in(self) -> None:
+        """Opt-in live CBM end-to-end structural query test (RUN_CBM_LIVE_TESTS=1)."""
+        if os.environ.get("RUN_CBM_LIVE_TESTS") != "1":
+            self.skipTest("Live CBM tests not enabled. Set RUN_CBM_LIVE_TESTS=1 to run.")
+
+        cbm = CodebaseMemoryMCPProvider()
+        health = cbm.check_health()
+        if not health.is_ok():
+            self.skipTest(f"Live CBM binary not available: {health.diagnostic}")
+
+        # If available, test real structural query against repository root
+        root = Path(__file__).resolve().parents[1]
+        res = cbm.query_impact_result(repo_path=root, query="ContextPack", scope_paths=["src/context_forge/core/models.py"])
+        self.assertIn(
+            res.status,
+            (ProviderStatus.OK, ProviderStatus.NO_RESULTS, ProviderStatus.UNINDEXED),
+            f"Live CBM query failed unexpectedly: {res.diagnostic}",
+        )
 
 
 if __name__ == "__main__":
