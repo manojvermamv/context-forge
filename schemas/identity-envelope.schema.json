@@ -20,7 +20,17 @@
     "conversation_id": { "type": "string" },
     "task_id": { "type": "string" },
     "producer": { "type": "string" },
+    "producer_type": { "type": "string", "enum": ["human", "agent", "mcp_tool", "hook", "test_runner", "ci"] },
+    "producer_id": { "type": "string" },
+    "producer_version": { "type": "string" },
     "reviewer": { "type": "string" },
+    "harness": { "type": "string" },
+    "model_provider": { "type": "string" },
+    "model_id": { "type": "string" },
+    "authority_domain": { "type": "string", "enum": ["INTENT", "POLICY", "IMPLEMENTATION", "EXPERIENCE"] },
+    "authority_level": { "type": "integer" },
+    "schema_version": { "type": "string" },
+    "checkpoint_id": { "type": "string" },
     "timestamp": { "type": "string", "format": "date-time" }
   }
 }

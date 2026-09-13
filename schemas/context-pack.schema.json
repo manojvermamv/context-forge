@@ -43,6 +43,11 @@
           "type": "array",
           "items": { "type": "string" },
           "description": "Strictly bounded 1-3 file paths recommended for opening"
+        },
+        "provider_diagnostics": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Health, status, and connection diagnostics for external and native intelligence providers"
         }
       }
     }

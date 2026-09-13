@@ -25,8 +25,10 @@ from context_forge.core.identity import build_identity_envelope
 from context_forge.compiler.conflict import ConflictResolver
 from context_forge.compiler.pack import compile_context_pack
 from context_forge.traceability.freshness import check_record_freshness
+from context_forge.providers.base import ProviderStatus, ProviderResult
 from context_forge.providers.code import NativeCodeProvider, CodebaseMemoryMCPProvider
 from context_forge.providers.experience import NativeExperienceProvider, AgentMemoryProvider
+
 from context_forge.cli.commands import cmd_init
 
 
@@ -153,17 +155,141 @@ class ContextForgeV2ModuleTests(unittest.TestCase):
         native_code = NativeCodeProvider()
         self.assertTrue(native_code.is_available())
         self.assertEqual(native_code.name(), "native_code_map")
+        health = native_code.check_health()
+        self.assertEqual(health.status, ProviderStatus.OK)
 
         cbm = CodebaseMemoryMCPProvider()
-        # Without CBM server running, is_available is False without raising exception
+        # Without CBM installed, is_available is False and returns UNAVAILABLE ProviderResult
         self.assertFalse(cbm.is_available())
+        cbm_health = cbm.check_health()
+        self.assertEqual(cbm_health.status, ProviderStatus.UNAVAILABLE)
         self.assertEqual(cbm.query_impact("test", []), [])
 
-        am = AgentMemoryProvider()
-        # Without AgentMemory running, is_available is False without raising exception
+        am = AgentMemoryProvider(endpoint_url="http://localhost:59999")
+        # Without AgentMemory running, returns UNAVAILABLE ProviderResult
         self.assertFalse(am.is_available())
+        am_health = am.check_health()
+        self.assertEqual(am_health.status, ProviderStatus.UNAVAILABLE)
         self.assertEqual(am.recall_lessons("test"), [])
+
+    def test_agentmemory_contract_integration(self) -> None:
+        """Contract integration test against real AgentMemory endpoints and Bearer auth."""
+        import http.server
+        import threading
+        import json
+
+        class MockAgentMemoryHandler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, format, *args):
+                pass  # Silence stderr
+
+            def do_GET(self):
+                auth = self.headers.get("Authorization", "")
+                if self.path == "/agentmemory/health":
+                    if auth != "Bearer test-secret-123":
+                        self.send_response(401)
+                        self.end_headers()
+                        self.wfile.write(b'{"error": "Unauthorized"}')
+                        return
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(b'{"status": "ok", "version": "1.4.2", "capabilities": ["smart-search"]}')
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+
+            def do_POST(self):
+                auth = self.headers.get("Authorization", "")
+                if auth != "Bearer test-secret-123":
+                    self.send_response(401)
+                    self.end_headers()
+                    return
+                if self.path == "/agentmemory/smart-search":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    resp = {
+                        "results": [
+                            {"content": "Use Redis advisory locks for high-frequency writes", "id": "mem-101"}
+                        ]
+                    }
+                    self.wfile.write(json.dumps(resp).encode("utf-8"))
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), MockAgentMemoryHandler)
+        port = server.server_address[1]
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+
+        try:
+            # 1. Valid auth
+            am = AgentMemoryProvider(endpoint_url=f"http://127.0.0.1:{port}", secret="test-secret-123")
+            health = am.check_health()
+            self.assertEqual(health.status, ProviderStatus.OK)
+            self.assertEqual(health.version, "1.4.2")
+
+            lessons_res = am.recall_lessons_result("locks", limit=2)
+            self.assertEqual(lessons_res.status, ProviderStatus.OK)
+            self.assertEqual(len(lessons_res.data), 1)
+            self.assertIn("Redis advisory locks", lessons_res.data[0]["finding"])
+
+            # 2. Invalid auth -> UNAUTHORIZED
+            am_bad_auth = AgentMemoryProvider(endpoint_url=f"http://127.0.0.1:{port}", secret="wrong-secret")
+            bad_health = am_bad_auth.check_health()
+            self.assertEqual(bad_health.status, ProviderStatus.UNAUTHORIZED)
+            self.assertIn("authentication failed", bad_health.diagnostic)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+
+    def test_cbm_cli_contract_integration(self) -> None:
+        """Contract integration test against CBM CLI invocation protocol."""
+        import stat
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            # Create a mock CLI script (runnable via python)
+            if sys.platform == "win32":
+                mock_exe = tmp_dir / "codebase-memory-mcp.bat"
+                mock_exe.write_text(
+                    f'@echo off\n"{sys.executable}" "{tmp_dir / "cbm_runner.py"}" %*\n',
+                    encoding="utf-8",
+                )
+            else:
+                mock_exe = tmp_dir / "codebase-memory-mcp"
+                mock_exe.write_text(
+                    f'#!/bin/sh\n"{sys.executable}" "{tmp_dir / "cbm_runner.py"}" "$@"\n',
+                    encoding="utf-8",
+                )
+                mock_exe.chmod(mock_exe.stat().st_mode | stat.S_IEXEC)
+
+            runner = tmp_dir / "cbm_runner.py"
+            runner.write_text(
+                'import sys, json\n'
+                'if "--version" in sys.argv:\n'
+                '    print("0.10.8")\n'
+                'elif len(sys.argv) >= 3 and sys.argv[1] == "cli":\n'
+                '    tool = sys.argv[2]\n'
+                '    if tool == "search_graph":\n'
+                '        print(json.dumps([{"name": "RiskGate", "path": "src/risk.py", "signature": "class RiskGate"}]))\n'
+                '    else:\n'
+                '        print(json.dumps([]))\n',
+                encoding="utf-8",
+            )
+
+            cbm = CodebaseMemoryMCPProvider(executable_path=str(mock_exe))
+            health = cbm.check_health()
+            self.assertEqual(health.status, ProviderStatus.OK)
+            self.assertEqual(health.version, "0.10.8")
+
+            impact_res = cbm.query_impact_result("risk", ["."])
+            self.assertEqual(impact_res.status, ProviderStatus.OK)
+            self.assertEqual(len(impact_res.data), 1)
+            self.assertEqual(impact_res.data[0]["symbol"], "RiskGate")
 
 
 if __name__ == "__main__":
     unittest.main()
+

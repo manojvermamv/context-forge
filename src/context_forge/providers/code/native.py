@@ -143,6 +143,9 @@ def build_code_map(repo: Path) -> str:
     return "\n".join(lines) + "\n"
 
 
+from context_forge.providers.base import CodeIntelligenceProvider, ProviderResult, ProviderStatus
+
+
 class NativeCodeProvider(CodeIntelligenceProvider):
     """Native code intelligence based on deterministic symbol scanning."""
 
@@ -152,11 +155,27 @@ class NativeCodeProvider(CodeIntelligenceProvider):
     def is_available(self) -> bool:
         return True
 
+    def check_health(self) -> ProviderResult:
+        return ProviderResult(
+            status=ProviderStatus.OK,
+            provider=self.name(),
+            version="2.0",
+            capabilities=["deterministic_symbol_map", "file_impact"],
+            diagnostic="Native deterministic code mapper ready.",
+        )
+
     def get_symbol_map(self, repo_path: str) -> str:
         return build_code_map(Path(repo_path))
 
-    def query_impact(self, query: str, paths: list[str]) -> list[dict[str, Any]]:
+    def query_impact_result(self, query: str, paths: list[str]) -> ProviderResult:
         results = []
         for p in paths:
             results.append({"path": p, "details": "Directly specified in task scope."})
-        return results
+        status = ProviderStatus.OK if results else ProviderStatus.NO_RESULTS
+        return ProviderResult(
+            status=status,
+            provider=self.name(),
+            data=results,
+            diagnostic=f"Native scope mapping for {len(paths)} paths.",
+        )
+

@@ -9,8 +9,10 @@ from context_forge.store.markdown import extract_frontmatter_dict, first_heading
 from context_forge.compiler.router import search_knowledge_index
 from context_forge.compiler.conflict import ConflictResolver
 from context_forge.compiler.allocator import allocate_context_budget
+from context_forge.providers.base import ProviderStatus, ProviderResult
 from context_forge.providers.code import NativeCodeProvider, CodebaseMemoryMCPProvider
 from context_forge.providers.experience import NativeExperienceProvider, AgentMemoryProvider
+
 
 
 def compile_context_pack(
@@ -64,18 +66,37 @@ def compile_context_pack(
                 })
 
     # 2. Code Truth provider (CBM if available, otherwise Native)
+    provider_diagnostics = []
     cbm = CodebaseMemoryMCPProvider()
-    code_provider = cbm if cbm.is_available() else NativeCodeProvider()
-    code_reality = code_provider.query_impact(task_query, scope_paths)
+    cbm_res = cbm.query_impact_result(task_query, scope_paths)
+    if cbm_res.status in (ProviderStatus.OK, ProviderStatus.NO_RESULTS):
+        code_reality = cbm_res.data or []
+        provider_diagnostics.append("Code intelligence: Codebase-Memory-MCP connected.")
+    else:
+        native_code = NativeCodeProvider()
+        native_res = native_code.query_impact_result(task_query, scope_paths)
+        code_reality = native_res.data or []
+        provider_diagnostics.append("Code intelligence: CBM unavailable; native mapper used.")
 
     # 3. Experience provider (AgentMemory if available, otherwise Native)
     am = AgentMemoryProvider()
-    exp_provider = am if am.is_available() else NativeExperienceProvider(repo)
-    past_experience = exp_provider.recall_lessons(task_query, limit=4)
+    am_res = am.recall_lessons_result(task_query, limit=4)
+    if am_res.status in (ProviderStatus.OK, ProviderStatus.NO_RESULTS):
+        past_experience = am_res.data or []
+        provider_diagnostics.append("Experience: AgentMemory connected.")
+    elif am_res.status == ProviderStatus.UNAUTHORIZED:
+        past_experience = []
+        provider_diagnostics.append("Experience: AgentMemory authentication failed; experience plane omitted.")
+    else:
+        native_exp = NativeExperienceProvider(repo)
+        native_exp_res = native_exp.recall_lessons_result(task_query, limit=4)
+        past_experience = native_exp_res.data or []
+        provider_diagnostics.append("Experience: AgentMemory unavailable; native session log used.")
 
-    # 4. Conflict resolution
+    # 4. Conflict resolution and Cross-Plane Drift Governance
     detected_conflicts = ConflictResolver.detect_conflicts(authoritative, past_experience)
-    all_alerts = staleness_alerts + detected_conflicts
+    code_drifts = ConflictResolver.detect_code_drift(authoritative, code_reality)
+    all_alerts = staleness_alerts + detected_conflicts + code_drifts
 
     # 5. Budget allocation
     sections = {
@@ -98,6 +119,7 @@ def compile_context_pack(
         open_questions=trimmed["open_questions"],
         conflicts_and_staleness=trimmed["conflicts_and_staleness"],
         next_reading=trimmed["next_reading"],
+        provider_diagnostics=provider_diagnostics,
     )
 
     rendered = pack.to_text()
@@ -105,3 +127,4 @@ def compile_context_pack(
     pack.estimated_tokens = Budgets.rough_tokens(pack.total_chars)
 
     return pack
+

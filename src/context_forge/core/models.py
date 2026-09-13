@@ -16,7 +16,7 @@ def today() -> str:
 
 @dataclass
 class IdentityEnvelope:
-    """Provenance and identity of the actor (human, agent, team, session) creating or updating knowledge."""
+    """Provenance and identity of the actor (human, agent, team, session, tool) creating or updating knowledge."""
     project_id: str = ""
     repository: str = ""
     commit_sha: str = ""
@@ -28,8 +28,18 @@ class IdentityEnvelope:
     session_id: str = ""
     conversation_id: str = ""
     task_id: str = ""
-    producer: str = ""
+    producer: str = ""         # Actor or tool producing knowledge (e.g. cbm, agentmemory, user, hook, pytest)
+    producer_type: str = ""    # human, agent, mcp_tool, hook, test_runner, ci
+    producer_id: str = ""
+    producer_version: str = ""
     reviewer: str = ""
+    harness: str = ""          # antigravity, cursor, claude-code, codex, cli
+    model_provider: str = ""
+    model_id: str = ""
+    authority_domain: str = "" # INTENT, POLICY, IMPLEMENTATION, EXPERIENCE
+    authority_level: int = 70
+    schema_version: str = "2.0"
+    checkpoint_id: str = ""
     timestamp: str = field(default_factory=now_iso)
 
     def to_dict(self) -> dict[str, Any]:
@@ -41,6 +51,7 @@ class IdentityEnvelope:
             return cls()
         valid = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
         return cls(**valid)
+
 
 
 @dataclass
@@ -221,6 +232,8 @@ class ContextPack:
     conflicts_and_staleness: list[dict[str, Any]] = field(default_factory=list)
     next_reading: list[str] = field(default_factory=list)
 
+    provider_diagnostics: list[str] = field(default_factory=list)
+
     def to_text(self) -> str:
         """Render into human and agent-readable Markdown context pack."""
         lines = [
@@ -228,6 +241,12 @@ class ContextPack:
             f"_Compiled at {self.compiled_at} · Total chars: {self.total_chars} (~{self.estimated_tokens} tokens)_",
             "",
         ]
+        if self.provider_diagnostics:
+            lines.append("## Provider Health & Intelligence Sources")
+            for diag in self.provider_diagnostics:
+                lines.append(f"- ℹ️ {diag}")
+            lines.append("")
+
         if self.authoritative_intent:
             lines.append("## 1. Authoritative Intent (REQ / ADR)")
             for item in self.authoritative_intent:
