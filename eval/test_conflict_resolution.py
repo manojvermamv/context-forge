@@ -70,8 +70,8 @@ def evaluate_conflict_resolution() -> dict[str, float | int]:
     # 4. Pairwise General Cross-Plane Interactions
     pairwise_scenarios = [
         (
-            {"id": "ADR-005", "kind": "decision", "authority": "user_explicit", "authority_level": 90, "title": "Use RabbitMQ"},
-            {"id": "MEM-099", "kind": "memory", "authority": "episodic_memory", "authority_level": 40, "title": "Try Kafka"},
+            {"id": "ADR-005", "kind": "decision", "authority": "user_explicit", "authority_level": 90, "title": "Use RabbitMQ", "subject": "message_broker", "object": "rabbitmq"},
+            {"id": "MEM-099", "kind": "memory", "authority": "episodic_memory", "authority_level": 40, "title": "Try Kafka", "subject": "message_broker", "object": "kafka"},
             ResolutionDisposition.ADVICE_REJECTED.value,
         ),
         (
