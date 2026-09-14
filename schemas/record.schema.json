@@ -4,7 +4,14 @@
   "title": "ContextForgeKnowledgeRecord",
   "description": "Canonical schema for durable knowledge records in Context Forge v2.",
   "type": "object",
-  "required": ["id", "kind", "title", "status", "authority", "updated"],
+  "required": [
+    "id",
+    "kind",
+    "title",
+    "status",
+    "authority",
+    "updated"
+  ],
   "properties": {
     "id": {
       "type": "string",
@@ -29,7 +36,15 @@
     },
     "status": {
       "type": "string",
-      "enum": ["accepted", "observed", "open", "linked", "deprecated", "superseded", "rejected"]
+      "enum": [
+        "accepted",
+        "observed",
+        "open",
+        "linked",
+        "deprecated",
+        "superseded",
+        "rejected"
+      ]
     },
     "authority": {
       "type": "string",
@@ -63,15 +78,21 @@
     },
     "scope": {
       "type": "array",
-      "items": { "type": "string" }
+      "items": {
+        "type": "string"
+      }
     },
     "affected_symbols": {
       "type": "array",
-      "items": { "type": "string" }
+      "items": {
+        "type": "string"
+      }
     },
     "affected_tests": {
       "type": "array",
-      "items": { "type": "string" }
+      "items": {
+        "type": "string"
+      }
     },
     "supersedes": {
       "type": "string"
@@ -81,7 +102,13 @@
     },
     "freshness": {
       "type": "string",
-      "enum": ["fresh", "possibly_stale", "stale", "contradicted", "unverified"],
+      "enum": [
+        "fresh",
+        "possibly_stale",
+        "stale",
+        "contradicted",
+        "unverified"
+      ],
       "default": "fresh"
     },
     "body": {
@@ -91,25 +118,64 @@
       "type": "string"
     },
     "claim": {
-      "type": ["object", "null"],
+      "type": [
+        "object",
+        "null"
+      ],
       "description": "Structured proposition for deterministic semantic conflict resolution.",
       "properties": {
-        "subject": { "type": "string" },
-        "predicate": { "type": "string" },
-        "object": { "type": "string" },
-        "polarity": { "type": "boolean" },
-        "claim_key": { "type": "string" },
-        "qualifiers": { "type": "object" },
-        "scope": { "type": "array", "items": { "type": "string" } },
-        "confidence": { "type": "number" }
+        "subject": {
+          "type": "string"
+        },
+        "predicate": {
+          "type": "string"
+        },
+        "object": {
+          "type": "string"
+        },
+        "polarity": {
+          "type": "boolean"
+        },
+        "claim_key": {
+          "type": "string"
+        },
+        "qualifiers": {
+          "type": "object"
+        },
+        "scope": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "confidence": {
+          "type": "number"
+        }
       },
-      "required": ["subject", "predicate", "object"]
+      "required": [
+        "subject",
+        "predicate",
+        "object"
+      ]
     },
-    "claim_subject": { "type": "string" },
-    "claim_predicate": { "type": "string" },
-    "claim_object": { "type": "string" },
-    "claim_polarity": { "type": ["boolean", "string"] },
-    "claim_key": { "type": "string" },
+    "claim_subject": {
+      "type": "string"
+    },
+    "claim_predicate": {
+      "type": "string"
+    },
+    "claim_object": {
+      "type": "string"
+    },
+    "claim_polarity": {
+      "type": [
+        "boolean",
+        "string"
+      ]
+    },
+    "claim_key": {
+      "type": "string"
+    },
     "extra_frontmatter": {
       "type": "object"
     }
