@@ -138,14 +138,17 @@ def cmd_doctor(repo: Path) -> None:
         exe = cbm._resolve_executable()
         print(f"    binary path: {exe}")
         print(f"    version: {cbm_health.version or 'unknown'}")
-        print("    transport: stdio / cli")
+        print("    transport: machine flags / stdio / cli")
+        adapter_caps = ", ".join(cbm.adapter_capabilities())
+        print(f"    adapter capabilities: {adapter_caps}")
+        discovered_caps = ", ".join(cbm_health.capabilities) if cbm_health.capabilities else "unknown (unqueried)"
+        print(f"    provider-discovered capabilities: {discovered_caps}")
+        print("    auto-index: disabled during doctor (read-only)")
         proj_name, proj_err = cbm.resolve_project(repo, allow_index=False)
         if proj_name:
-            print(f"    indexed project: {proj_name}")
+            print(f"    repository indexed: yes (project: {proj_name})")
         else:
-            print("    indexed project: not resolved (unindexed - native fallback active)")
-        caps_str = ", ".join(cbm_health.capabilities) if cbm_health.capabilities else "default"
-        print(f"    capabilities: {caps_str}")
+            print("    repository indexed: no (unindexed - native fallback active)")
         print(f"    status: {cbm_health.status.value}")
     else:
         if cbm_configured:
@@ -161,12 +164,13 @@ def cmd_doctor(repo: Path) -> None:
     print("  agentmemory [agent experience plane]:")
     print(f"    configured: {'yes' if am_configured else 'optional (not explicitly configured)'}")
     print(f"    endpoint url: {am.endpoint_url}")
-    print(f"    auth token configured: {'yes (hidden)' if os.environ.get('AGENTMEMORY_SECRET') else 'none'}")
+    print("    identity validation mode: service identity ('agentmemory') or capabilities ('smart-search', 'memories')")
+    print(f"    auth token configured: {'yes (hidden)' if os.environ.get('AGENTMEMORY_SECRET') or am.secret else 'none'}")
     if am_health.status == ProviderStatus.OK:
         print(f"    health: OK ({am_health.execution_time_ms:.1f}ms)")
         print(f"    version: {am_health.version or 'unknown'}")
-        caps_str = ", ".join(am_health.capabilities) if am_health.capabilities else "default"
-        print(f"    capabilities: {caps_str}")
+        caps_str = ", ".join(am_health.capabilities) if am_health.capabilities else "none returned"
+        print(f"    capabilities returned: {caps_str}")
         print("    status: operational")
     else:
         if am_configured:

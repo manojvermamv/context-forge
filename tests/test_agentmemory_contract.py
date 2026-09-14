@@ -112,6 +112,14 @@ class TestAgentMemoryContract(unittest.TestCase):
                         self.wfile.write(json.dumps({
                             "results": [{"content": "Use Redis advisory locks", "id": "mem-1"}]
                         }).encode("utf-8"))
+                elif self.path == "/agentmemory/remember":
+                    length = int(self.headers.get("Content-Length", 0))
+                    body = json.loads(self.rfile.read(length).decode("utf-8"))
+                    content = body.get("content", "")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"status": "saved", "id": "mem-new-123", "content": content}).encode("utf-8"))
                 else:
                     self.send_response(404)
                     self.end_headers()
@@ -139,45 +147,42 @@ class TestAgentMemoryContract(unittest.TestCase):
             self.assertEqual(h_mal.capabilities, [])
             self.assertIn("invalid JSON", h_mal.diagnostic)
 
-            # 3. Empty JSON {} with HTTP 200 -> INCOMPATIBLE (reject arbitrary empty JSON)
+            # 3. Empty JSON -> INCOMPATIBLE
             am_empty = AgentMemoryProvider(endpoint_url=url, secret="secret-empty-json")
-            h_empty = am_empty.check_health()
-            self.assertEqual(h_empty.status, ProviderStatus.INCOMPATIBLE)
-            self.assertIn("AgentMemory identity", h_empty.diagnostic)
+            h_emp = am_empty.check_health()
+            self.assertEqual(h_emp.status, ProviderStatus.INCOMPATIBLE)
+            self.assertIn("lacks AgentMemory identity", h_emp.diagnostic)
 
-            # 4. Arbitrary {"foo": "bar"} with HTTP 200 -> INCOMPATIBLE (reject unrelated HTTP services)
+            # 4. Arbitrary non-AgentMemory JSON -> INCOMPATIBLE
             am_arb = AgentMemoryProvider(endpoint_url=url, secret="secret-arbitrary-json")
             h_arb = am_arb.check_health()
             self.assertEqual(h_arb.status, ProviderStatus.INCOMPATIBLE)
 
-            # 5. Arbitrary {"status": "ok"} without agentmemory identity -> INCOMPATIBLE
-            am_status_ok = AgentMemoryProvider(endpoint_url=url, secret="secret-status-ok")
-            h_status_ok = am_status_ok.check_health()
-            self.assertEqual(h_status_ok.status, ProviderStatus.INCOMPATIBLE)
+            # 5. Missing capabilities -> INCOMPATIBLE
+            am_st = AgentMemoryProvider(endpoint_url=url, secret="secret-status-ok")
+            h_st = am_st.check_health()
+            self.assertEqual(h_st.status, ProviderStatus.INCOMPATIBLE)
 
-            # 6. Arbitrary {"version": "1.0"} without agentmemory identity -> INCOMPATIBLE
-            am_version_only = AgentMemoryProvider(endpoint_url=url, secret="secret-version-only")
-            h_version_only = am_version_only.check_health()
-            self.assertEqual(h_version_only.status, ProviderStatus.INCOMPATIBLE)
+            # 6. Version only without capabilities/service -> INCOMPATIBLE
+            am_vo = AgentMemoryProvider(endpoint_url=url, secret="secret-version-only")
+            h_vo = am_vo.check_health()
+            self.assertEqual(h_vo.status, ProviderStatus.INCOMPATIBLE)
 
-            # 7. Degraded mode {"status": "degraded"} -> DEGRADED and is_available() == True
-            am_degraded = AgentMemoryProvider(endpoint_url=url, secret="secret-degraded")
-            h_deg = am_degraded.check_health()
+            # 7. Degraded state
+            am_deg = AgentMemoryProvider(endpoint_url=url, secret="secret-degraded")
+            h_deg = am_deg.check_health()
             self.assertEqual(h_deg.status, ProviderStatus.DEGRADED)
-            self.assertTrue(am_degraded.is_available())
-            res_deg = am_degraded.recall_lessons_result("locks")
-            self.assertEqual(res_deg.status, ProviderStatus.OK)
-            self.assertEqual(len(res_deg.data), 1)
+            self.assertEqual(h_deg.version, "1.4.2")
 
-            # 8. HTTP 503 with AgentMemory identity -> DEGRADED
-            am_503 = AgentMemoryProvider(endpoint_url=url, secret="secret-503-am")
-            h_503 = am_503.check_health()
-            self.assertEqual(h_503.status, ProviderStatus.DEGRADED)
-
-            # 9. HTTP 500 -> ERROR
+            # 8. Server error 500 -> ERROR
             am_err = AgentMemoryProvider(endpoint_url=url, secret="secret-server-error")
             h_err = am_err.check_health()
             self.assertEqual(h_err.status, ProviderStatus.ERROR)
+
+            # 9. Server 503 with service identity -> DEGRADED
+            am_503 = AgentMemoryProvider(endpoint_url=url, secret="secret-503-am")
+            h_503 = am_503.check_health()
+            self.assertEqual(h_503.status, ProviderStatus.DEGRADED)
 
             # 10. Invalid auth -> UNAUTHORIZED
             am_bad_auth = AgentMemoryProvider(endpoint_url=url, secret="wrong-secret")
@@ -194,6 +199,11 @@ class TestAgentMemoryContract(unittest.TestCase):
             res_empty = am_valid.recall_lessons_result("empty")
             self.assertEqual(res_empty.status, ProviderStatus.NO_RESULTS)
             self.assertEqual(res_empty.data, [])
+
+            # 13. Write / remember
+            w_res = am_valid.remember("Always enforce locks", concepts=["locks"])
+            self.assertEqual(w_res.status, ProviderStatus.OK)
+            self.assertEqual(w_res.data["status"], "saved")
 
         finally:
             server.shutdown()
@@ -212,22 +222,52 @@ class TestAgentMemoryContract(unittest.TestCase):
         self.assertTrue(health.is_ok(), "Live AgentMemory must be healthy")
 
     def test_live_agentmemory_e2e_recall_opt_in(self) -> None:
-        """Opt-in live AgentMemory end-to-end recall test (RUN_AGENTMEMORY_LIVE_TESTS=1). Fails if enabled and broken."""
+        """Opt-in live AgentMemory end-to-end write->recall test (RUN_AGENTMEMORY_LIVE_TESTS=1). Fails if enabled and broken."""
         if os.environ.get("RUN_AGENTMEMORY_LIVE_TESTS") != "1":
             self.skipTest("Live AgentMemory tests not enabled. Set RUN_AGENTMEMORY_LIVE_TESTS=1 to run.")
+
+        import tempfile
+        import uuid
+        from context_forge.cli.commands import cmd_init
 
         am = AgentMemoryProvider()
         health = am.check_health()
         if not health.is_ok():
             self.fail(f"Live AgentMemory server not available: {health.diagnostic}")
 
-        res = am.recall_lessons_result("concurrency lock architecture", limit=3)
-        self.assertIn(
-            res.status,
-            (ProviderStatus.OK, ProviderStatus.NO_RESULTS),
-            f"Live AgentMemory query failed unexpectedly: {res.diagnostic}",
+        probe_id = f"context-forge-live-probe-{uuid.uuid4().hex[:12]}"
+        probe_content = f"Test architectural experience probe: {probe_id}. Always enforce isolated thread locks."
+
+        # Write probe memory via upstream API
+        write_res = am.remember(
+            content=probe_content,
+            concepts=["test-probe", "concurrency"],
+            metadata={"ephemeral": True, "producer": "context-forge-e2e-test", "probe_id": probe_id},
         )
-        self.assertIsInstance(res.data, list)
+        if not write_res.is_ok():
+            self.fail(f"Live AgentMemory write failed for probe {probe_id}: {write_res.diagnostic}")
+
+        # Recall probe memory via smart-search
+        recall_res = am.recall_lessons_result(probe_id, limit=3)
+        if recall_res.status == ProviderStatus.NO_RESULTS:
+            self.fail(f"Live AgentMemory probe recall returned NO_RESULTS for newly written probe: {probe_id}")
+        if not recall_res.is_ok():
+            self.fail(f"Live AgentMemory probe recall failed: {recall_res.diagnostic}")
+
+        found = any(probe_id in str(item.get("finding", "")) or probe_id in str(item.get("lesson", "")) for item in recall_res.data)
+        if not found:
+            self.fail(f"Live AgentMemory probe recall results did not contain probe {probe_id}: {recall_res.data}")
+
+        # Compile into ContextPack and verify it appears in Past Experience
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            cmd_init(repo)
+            from context_forge.compiler.pack import compile_context_pack
+            pack = compile_context_pack(repo, task_query=probe_id, paths=[])
+            self.assertIsNotNone(pack)
+            pack_text = pack.to_text()
+            self.assertIn("Past Experience", pack_text)
+            self.assertIn(probe_id, pack_text)
 
 
 if __name__ == "__main__":

@@ -212,6 +212,147 @@ class TraceabilityGraphTestCase(unittest.TestCase):
         with self.assertRaises(TypeError):
             reconcile_traceability_with_provider(self.tmp, graph, BrokenProvider())
 
+    def test_symbol_existence_does_not_verify_requested_relationship(self):
+        """Release blocker: CBM proving symbol existence must NOT verify a requested relationship edge."""
+        create_knowledge_record(
+            repo=self.tmp,
+            kind="requirement",
+            title="Token Service Requirement",
+            body="TokenService must implement authentication.",
+            authority="user_explicit",
+            evidence="Spec",
+            scope=["src/router.py"],
+            accept=True,
+        )
+        graph = resolve_traceability_graph(self.tmp)
+        # Give edge a specific symbol and relationship
+        graph[0]["edges"][0]["symbol"] = "TokenService"
+        graph[0]["edges"][0]["relationship"] = "implements"
+
+        class MockSymbolOnlyProvider:
+            def is_available(self):
+                return True
+
+            def name(self):
+                return "cbm"
+
+            def verify_reference(self, repo_path, path, symbol=None, relationship=None):
+                return ProviderResult(
+                    status=ProviderStatus.OK,
+                    data={
+                        "symbol": "TokenService",
+                        "path": path,
+                        "reference_verified": True,
+                        "symbol_verified": True,
+                        "relationship_requested": True,
+                        "relationship_verified": False,
+                        "structurally_verified": False,
+                        "verification_kind": "symbol_graph",
+                        "confidence": 0.90,
+                        "edge_confidence": 0.50,
+                    },
+                    provider="cbm",
+                    diagnostic="Symbol 'TokenService' found, but relationship 'implements' not found in AST.",
+                )
+
+        reconciled = reconcile_traceability_with_provider(self.tmp, graph, MockSymbolOnlyProvider())
+        edge = reconciled[0]["edges"][0]
+        self.assertNotEqual(edge["verification_state"], "verified")
+        self.assertEqual(edge["verification_state"], "partially_verified")
+        self.assertTrue(edge["symbol_verified"])
+        self.assertFalse(edge["relationship_verified"])
+        self.assertFalse(edge["structurally_verified"])
+        self.assertLessEqual(edge["confidence"], 0.50)
+        self.assertNotEqual(reconciled[0]["verification_state"], "verified")
+
+    def test_filesystem_only_evidence_does_not_verify_relationship(self):
+        """Filesystem existence alone must not verify a relationship edge."""
+        create_knowledge_record(
+            repo=self.tmp,
+            kind="requirement",
+            title="File Requirement",
+            body="Requirement on router file.",
+            authority="user_explicit",
+            evidence="Spec",
+            scope=["src/router.py"],
+            accept=True,
+        )
+        graph = resolve_traceability_graph(self.tmp)
+        graph[0]["edges"][0]["relationship"] = "implements"
+
+        class MockFilesystemProvider:
+            def is_available(self):
+                return True
+
+            def name(self):
+                return "cbm"
+
+            def verify_reference(self, repo_path, path, symbol=None, relationship=None):
+                return ProviderResult(
+                    status=ProviderStatus.OK,
+                    data={
+                        "path": path,
+                        "reference_verified": True,
+                        "symbol_verified": False,
+                        "relationship_requested": True,
+                        "relationship_verified": False,
+                        "structurally_verified": False,
+                        "verification_kind": "filesystem",
+                        "confidence": 0.50,
+                        "edge_confidence": 0.0,
+                    },
+                    provider="cbm",
+                    diagnostic="Path exists on filesystem; AST relation unverified.",
+                )
+
+        reconciled = reconcile_traceability_with_provider(self.tmp, graph, MockFilesystemProvider())
+        edge = reconciled[0]["edges"][0]
+        self.assertEqual(edge["verification_state"], "unverified")
+        self.assertTrue(edge["reference_verified"])
+        self.assertFalse(edge["relationship_verified"])
+        self.assertEqual(edge["confidence"], 0.50)
+
+    def test_cbm_cannot_upgrade_project_governance_edges(self):
+        """External code provider must not be allowed to verify PROJECT_GOVERNANCE edges (e.g. SATISFIES, DERIVED_FROM)."""
+        graph = [
+            {
+                "canonical_id": "REQ-001",
+                "verification_state": "unverified",
+                "edges": [
+                    {
+                        "edge_type": TraceEdgeType.SATISFIES.value,
+                        "verification_domain": "PROJECT_GOVERNANCE",
+                        "target_ref": "ADR-002",
+                        "target_kind": "decision",
+                        "verification_state": "unverified",
+                        "confidence": 0.5,
+                        "evidence": "Canonical governance link",
+                    }
+                ],
+            }
+        ]
+
+        class MockOmniscientProvider:
+            def is_available(self):
+                return True
+
+            def name(self):
+                return "cbm"
+
+            def verify_reference(self, repo_path, path, symbol=None, relationship=None):
+                return ProviderResult(
+                    status=ProviderStatus.OK,
+                    data={"structurally_verified": True, "relationship_verified": True, "confidence": 1.0},
+                    provider="cbm",
+                )
+
+        reconciled = reconcile_traceability_with_provider(self.tmp, graph, MockOmniscientProvider())
+        edge = reconciled[0]["edges"][0]
+        # Must NOT be modified or upgraded to verified by CBM!
+        self.assertEqual(edge["verification_state"], "unverified")
+        self.assertEqual(edge["confidence"], 0.5)
+        self.assertNotIn("cbm", edge.get("provider", ""))
+
 
 if __name__ == "__main__":
     unittest.main()

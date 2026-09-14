@@ -100,11 +100,12 @@ def finalize_context_pack(pack: ContextPack, max_budget: Optional[int] = None) -
         # Step 1: Compact provider diagnostics if verbose
         compacted_diags = False
         for d in pack.provider_diagnostics:
-            if isinstance(d, dict):
+            if isinstance(d, dict) and not d.get("_truncated"):
                 msg = d.get("diagnostic_message") or d.get("diagnostic", "")
                 if len(msg) > 70:
                     d["diagnostic_message"] = msg[:67] + "..."
                     d["diagnostic"] = d["diagnostic_message"]
+                    d["_truncated"] = True
                     compacted_diags = True
                     break
         if compacted_diags:
@@ -133,12 +134,16 @@ def finalize_context_pack(pack: ContextPack, max_budget: Optional[int] = None) -
         # Step 6: Compact provider diagnostics down to single line summary per provider
         diag_summarized = False
         for d in pack.provider_diagnostics:
-            if isinstance(d, dict) and len(d.get("diagnostic_message", "")) > 40:
+            if isinstance(d, dict) and not d.get("_summarized"):
                 prov = d.get("provider") or d.get("provider_name") or "provider"
                 stat = d.get("status", "ok")
                 code = d.get("diagnostic_code") or ""
-                d["diagnostic_message"] = f"{prov}: {stat}" + (f" ({code})" if code else "")
-                d["diagnostic"] = d["diagnostic_message"]
+                summary_text = f"{prov}: {stat}" + (f" ({code})" if code else "")
+                if len(summary_text) > 40:
+                    summary_text = summary_text[:37] + "..."
+                d["diagnostic_message"] = summary_text
+                d["diagnostic"] = summary_text
+                d["_summarized"] = True
                 diag_summarized = True
         if diag_summarized:
             continue
@@ -151,22 +156,26 @@ def finalize_context_pack(pack: ContextPack, max_budget: Optional[int] = None) -
         # Step 8: Truncate long bodies in authoritative intent (max 80 chars)
         truncated_intent = False
         for item in pack.authoritative_intent:
-            body = item.get("body", "")
-            if len(body) > 80:
-                item["body"] = body[:77] + "..."
-                truncated_intent = True
-                break
+            if not item.get("_truncated"):
+                body = item.get("body", "")
+                if len(body) > 80:
+                    item["body"] = body[:77] + "..."
+                    item["_truncated"] = True
+                    truncated_intent = True
+                    break
         if truncated_intent:
             continue
 
         # Step 9: Truncate current_implementation details
         truncated_impl = False
         for item in pack.current_implementation:
-            det = item.get("details", "")
-            if len(det) > 40:
-                item["details"] = det[:37] + "..."
-                truncated_impl = True
-                break
+            if not item.get("_truncated"):
+                det = item.get("details", "")
+                if len(det) > 40:
+                    item["details"] = det[:37] + "..."
+                    item["_truncated"] = True
+                    truncated_impl = True
+                    break
         if truncated_impl:
             continue
 
@@ -305,10 +314,7 @@ def allocate_context_budget(
         provider_diagnostics=cloned_sections.get("provider_diagnostics", []),
     )
 
-    try:
-        finalize_context_pack(temp_pack, max_budget=max_budget)
-    except ContextBudgetError:
-        pass
+    finalize_context_pack(temp_pack, max_budget=max_budget)
 
     return {
         "authoritative_intent": temp_pack.authoritative_intent,

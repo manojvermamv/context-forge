@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from context_forge.core.models import KnowledgeRecord, EvidenceStatement, IdentityEnvelope, today
+from typing import Any
+from context_forge.core.models import (
+    KnowledgeRecord,
+    EvidenceStatement,
+    IdentityEnvelope,
+    ClaimProposition,
+    today,
+)
 from context_forge.core.authority import EpistemicAuthority
 from context_forge.core.evidence import sanitize_evidence
 from context_forge.core.identity import build_identity_envelope, get_git_info
@@ -73,6 +80,7 @@ def create_knowledge_record(
     scope: list[str],
     accept: bool,
     identity: IdentityEnvelope | None = None,
+    claim: ClaimProposition | dict[str, Any] | None = None,
 ) -> int:
     """Validate authority, allocate ID, create durable KnowledgeRecord, audit, and link traceability under lock."""
     p = brain_paths(repo)
@@ -121,6 +129,12 @@ def create_knowledge_record(
             if not actual_identity.worktree:
                 actual_identity.worktree = w_tree
 
+        parsed_claim = None
+        if isinstance(claim, ClaimProposition):
+            parsed_claim = claim
+        elif isinstance(claim, dict):
+            parsed_claim = ClaimProposition.from_dict(claim)
+
         record = KnowledgeRecord(
             id=record_id,
             kind=kind,
@@ -135,6 +149,7 @@ def create_knowledge_record(
                 observed_commit=actual_identity.commit_sha or "",
             ),
             identity=actual_identity,
+            claim=parsed_claim,
             scope=normalized_scope,
             path=path.relative_to(p["root"]).as_posix(),
         )

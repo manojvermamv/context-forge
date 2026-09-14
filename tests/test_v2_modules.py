@@ -204,6 +204,9 @@ class ContextForgeV2ModuleTests(unittest.TestCase):
                     self.send_response(401)
                     self.end_headers()
                     return
+                length = int(self.headers.get("Content-Length", 0))
+                if length > 0:
+                    _ = self.rfile.read(length)
                 if self.path == "/agentmemory/smart-search":
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json")

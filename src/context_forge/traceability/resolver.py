@@ -10,6 +10,8 @@ from context_forge.store.paths import brain_paths, read_text
 from context_forge.providers.base import (
     ProviderStatus,
     VerificationKind,
+    VerificationResult,
+    TraceEdgeVerificationDomain,
     verification_confidence,
 )
 
@@ -22,6 +24,18 @@ class TraceEdgeType(str, Enum):
     VERIFIES_WITH = "VERIFIES_WITH"     # Test suite/file verifies Component / Requirement / Decision
     OBSERVES = "OBSERVES"               # Technical record observes file / symbol
     DERIVED_FROM = "DERIVED_FROM"       # Record derived from parent requirement / decision
+
+
+def edge_type_to_domain(edge_type: TraceEdgeType | str) -> TraceEdgeVerificationDomain:
+    """Map explicit edge types to authoritative verification domains."""
+    val = edge_type.value if hasattr(edge_type, "value") else str(edge_type)
+    if val in (TraceEdgeType.SATISFIES.value, TraceEdgeType.DERIVED_FROM.value):
+        return TraceEdgeVerificationDomain.PROJECT_GOVERNANCE
+    if val == TraceEdgeType.VERIFIES_WITH.value:
+        return TraceEdgeVerificationDomain.TEST_EVIDENCE
+    if val == TraceEdgeType.OBSERVES.value:
+        return TraceEdgeVerificationDomain.FILESYSTEM
+    return TraceEdgeVerificationDomain.CODE_STRUCTURE
 
 
 @dataclass
@@ -42,6 +56,20 @@ class TraceEdge:
     relationship: Optional[str] = None
     verification_kind: str = VerificationKind.UNKNOWN.value
     structurally_verified: bool = False
+    verification_domain: str = TraceEdgeVerificationDomain.CODE_STRUCTURE.value
+    reference_verified: bool = False
+    symbol_verified: bool = False
+    relationship_requested: bool = False
+    relationship_verified: bool = False
+    reference_confidence: float = 0.5
+    relationship_confidence: float = 0.0
+    edge_confidence: float = 0.5
+
+    def __post_init__(self) -> None:
+        if not self.verification_domain:
+            self.verification_domain = edge_type_to_domain(self.edge_type).value
+        if self.relationship:
+            self.relationship_requested = True
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -60,6 +88,14 @@ class TraceEdge:
             "relationship": self.relationship,
             "verification_kind": self.verification_kind,
             "structurally_verified": self.structurally_verified,
+            "verification_domain": self.verification_domain,
+            "reference_verified": self.reference_verified,
+            "symbol_verified": self.symbol_verified,
+            "relationship_requested": self.relationship_requested,
+            "relationship_verified": self.relationship_verified,
+            "reference_confidence": self.reference_confidence,
+            "relationship_confidence": self.relationship_confidence,
+            "edge_confidence": self.edge_confidence,
         }
 
 
@@ -190,8 +226,12 @@ def reconcile_traceability_with_provider(
     
     If provider confirms structural relationship:
         strengthen edge confidence and mark verified.
+    If provider confirms symbol only but requested relationship is missing:
+        mark edge partially_verified (NOT verified!).
     If provider indicates entity missing:
         mark edge stale/contradicted.
+    If edge belongs to PROJECT_GOVERNANCE domain:
+        preserve canonical evidence; do not allow code intelligence to verify it.
     If provider is unavailable or unindexed:
         preserve historical edge and keep native unverified state with honest diagnostic.
     Recomputes aggregate entry verification_state.
@@ -205,6 +245,12 @@ def reconcile_traceability_with_provider(
 
     for entry in graph:
         for edge in entry.get("edges", []):
+            edge_domain = edge.get("verification_domain") or edge_type_to_domain(edge.get("edge_type", "")).value
+            if edge_domain == TraceEdgeVerificationDomain.PROJECT_GOVERNANCE.value:
+                # External code intelligence providers cannot verify project-governance edges (e.g. REQ SATISFIES ADR).
+                # Preserve existing canonical/evidence verification state.
+                continue
+
             target_ref = edge.get("target_ref", "")
             symbol = edge.get("symbol")
             relationship = edge.get("relationship") or edge.get("edge_type")
@@ -231,6 +277,8 @@ def reconcile_traceability_with_provider(
                 edge["verification_state"] = "unverified"
                 edge["verification_kind"] = VerificationKind.UNKNOWN.value
                 edge["structurally_verified"] = False
+                edge["relationship_verified"] = False
+                edge["edge_confidence"] = 0.0
                 edge["evidence"] = res.diagnostic or f"Provider '{provider_name}' does not support verifying requested relationship."
             elif res.is_ok() and res.data:
                 d = res.data if isinstance(res.data, dict) else {}
@@ -244,32 +292,67 @@ def reconcile_traceability_with_provider(
                         v_kind = VerificationKind.FILESYSTEM.value
 
                 structurally_verified = bool(d.get("structurally_verified", False))
+                relationship_verified = bool(d.get("relationship_verified", structurally_verified))
+                symbol_verified = bool(d.get("symbol_verified", bool(d.get("symbol"))))
+                reference_verified = bool(d.get("reference_verified", True))
                 conf = float(d.get("confidence", verification_confidence(v_kind)))
 
                 edge["provider"] = provider_name
                 edge["verification_kind"] = v_kind
                 edge["structurally_verified"] = structurally_verified
-                edge["confidence"] = conf
+                edge["relationship_verified"] = relationship_verified
+                edge["symbol_verified"] = symbol_verified
+                edge["reference_verified"] = reference_verified
+                edge["reference_confidence"] = float(d.get("reference_confidence", conf))
+                edge["relationship_confidence"] = float(d.get("relationship_confidence", 0.95 if relationship_verified else 0.0))
 
-                if structurally_verified:
+                # Epistemic Rule: A requested relationship edge may ONLY become verified
+                # when that relationship itself was structurally verified.
+                # If symbol is verified but requested relationship is missing => partially_verified!
+                if relationship and not relationship_verified:
+                    if symbol_verified or v_kind == VerificationKind.SYMBOL_GRAPH.value:
+                        edge["verification_state"] = "partially_verified"
+                        edge["confidence"] = min(conf, 0.50)
+                        edge["edge_confidence"] = min(conf, 0.50)
+                        edge["evidence"] = res.diagnostic or f"Symbol '{symbol or target_ref}' confirmed in {provider_name}, but requested relationship '{relationship}' was NOT verified."
+                    elif v_kind == VerificationKind.FILESYSTEM.value:
+                        edge["verification_state"] = "unverified"
+                        edge["confidence"] = 0.50
+                        edge["edge_confidence"] = 0.0
+                        edge["evidence"] = res.diagnostic or f"File path exists on disk; requested relationship '{relationship}' unverified by {provider_name}."
+                    else:
+                        edge["verification_state"] = "unverified"
+                        edge["confidence"] = 0.0
+                        edge["edge_confidence"] = 0.0
+                        edge["evidence"] = res.diagnostic or f"Relationship '{relationship}' unverified by {provider_name}."
+                elif structurally_verified or relationship_verified:
                     edge["verification_state"] = "verified"
                     edge["last_verified_at"] = now_iso()
+                    edge["confidence"] = conf
+                    edge["edge_confidence"] = conf
                     edge["evidence"] = res.diagnostic or f"Structural relationship confirmed via {provider_name}."
-                elif v_kind == VerificationKind.SYMBOL_GRAPH.value:
+                elif not relationship and (symbol_verified or v_kind == VerificationKind.SYMBOL_GRAPH.value):
                     edge["verification_state"] = "verified"
                     edge["last_verified_at"] = now_iso()
+                    edge["confidence"] = conf
+                    edge["edge_confidence"] = conf
                     edge["evidence"] = res.diagnostic or f"Symbol confirmed in {provider_name} graph."
                 elif v_kind == VerificationKind.FILESYSTEM.value:
-                    # Filesystem presence alone is NOT structural verification
                     edge["verification_state"] = "unverified"
+                    edge["confidence"] = 0.50
+                    edge["edge_confidence"] = 0.50
                     edge["evidence"] = res.diagnostic or f"File path exists on disk; structural relationship unverified by {provider_name}."
                 else:
                     edge["verification_state"] = "unverified"
+                    edge["confidence"] = 0.0
+                    edge["edge_confidence"] = 0.0
                     edge["evidence"] = res.diagnostic or f"Verification degraded via {provider_name}."
             elif res.status == ProviderStatus.NO_RESULTS:
                 edge["verification_state"] = "stale"
                 edge["confidence"] = 0.0
+                edge["edge_confidence"] = 0.0
                 edge["structurally_verified"] = False
+                edge["relationship_verified"] = False
                 edge["verification_kind"] = VerificationKind.UNKNOWN.value
                 edge["evidence"] = res.diagnostic or f"Reference '{target_ref}' missing in {provider_name}."
             elif res.status in (ProviderStatus.UNAVAILABLE, ProviderStatus.UNINDEXED):

@@ -50,6 +50,44 @@ def verification_confidence(kind: VerificationKind | str) -> float:
     return mapping.get(kind, 0.0)
 
 
+class TraceEdgeVerificationDomain(str, Enum):
+    """Explicit verification authority domain for traceability edges."""
+    PROJECT_GOVERNANCE = "PROJECT_GOVERNANCE"   # SATISFIES, DERIVED_FROM (Context Forge internal truth)
+    CODE_STRUCTURE = "CODE_STRUCTURE"           # SYMBOL_DEFINES, IMPLEMENTS code, calls, extends
+    TEST_EVIDENCE = "TEST_EVIDENCE"             # VERIFIES_WITH (test runner, test traces)
+    FILESYSTEM = "FILESYSTEM"                   # OBSERVES, native file existence
+    EXPLICIT_USER_LINK = "EXPLICIT_USER_LINK"   # Human explicit linking
+
+
+@dataclass
+class VerificationResult:
+    """Explicit epistemic classification of reference and relationship verification."""
+    reference_verified: bool = False
+    symbol_verified: bool = False
+    relationship_requested: bool = False
+    relationship_verified: bool = False
+    structurally_verified: bool = False
+    verification_kind: str = VerificationKind.UNKNOWN.value
+    reference_confidence: float = 0.0
+    relationship_confidence: float = 0.0
+    edge_confidence: float = 0.0
+    diagnostic: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "reference_verified": self.reference_verified,
+            "symbol_verified": self.symbol_verified,
+            "relationship_requested": self.relationship_requested,
+            "relationship_verified": self.relationship_verified,
+            "structurally_verified": self.structurally_verified,
+            "verification_kind": self.verification_kind,
+            "reference_confidence": self.reference_confidence,
+            "relationship_confidence": self.relationship_confidence,
+            "edge_confidence": self.edge_confidence,
+            "diagnostic": self.diagnostic,
+        }
+
+
 @dataclass
 class ProviderResult:
     """Structured response from an external or native intelligence provider."""

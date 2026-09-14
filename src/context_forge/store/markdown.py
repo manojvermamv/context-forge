@@ -4,7 +4,13 @@ import json
 import re
 from pathlib import Path
 from typing import Any
-from context_forge.core.models import KnowledgeRecord, EvidenceStatement, IdentityEnvelope, today
+from context_forge.core.models import (
+    KnowledgeRecord,
+    EvidenceStatement,
+    IdentityEnvelope,
+    ClaimProposition,
+    today,
+)
 
 
 def extract_frontmatter_dict(text: str) -> tuple[dict[str, Any], str]:
@@ -46,6 +52,19 @@ def extract_frontmatter_dict(text: str) -> tuple[dict[str, Any], str]:
             if not isinstance(res.get(current_key), list):
                 res[current_key] = []
             res[current_key].append(val)
+        elif (line.startswith("  ") or line.startswith("    ")) and ":" in line and current_key:
+            sub_k, sub_v = line.strip().split(":", 1)
+            sub_k = sub_k.strip()
+            sub_v = sub_v.strip().strip('"\'')
+            if sub_v.lower() == "true":
+                typed_v: Any = True
+            elif sub_v.lower() == "false":
+                typed_v = False
+            else:
+                typed_v = sub_v
+            if not isinstance(res.get(current_key), dict):
+                res[current_key] = {}
+            res[current_key][sub_k] = typed_v
         elif ":" in line:
             key, val = line.split(":", 1)
             key = key.strip()
@@ -59,7 +78,12 @@ def extract_frontmatter_dict(text: str) -> tuple[dict[str, Any], str]:
                 except (json.JSONDecodeError, ValueError):
                     res[key] = [x.strip().strip('"\'') for x in val[1:-1].split(",") if x.strip()]
             else:
-                res[key] = val
+                if val.lower() == "true":
+                    res[key] = True
+                elif val.lower() == "false":
+                    res[key] = False
+                else:
+                    res[key] = val
         else:
             current_key = None
 
@@ -226,6 +250,24 @@ def parse_markdown_record(path: Path, root: Path) -> KnowledgeRecord:
     if isinstance(aff_tests, str):
         aff_tests = [aff_tests]
 
+    # Parse Claim proposition if present
+    claim_obj = None
+    if isinstance(fm.get("claim"), dict):
+        claim_obj = ClaimProposition.from_dict(fm["claim"])
+    elif any(k in fm for k in ("claim_subject", "claim_predicate", "claim_object", "claim_key")):
+        pol_val = fm.get("claim_polarity", True)
+        if isinstance(pol_val, str):
+            pol_b = pol_val.lower() not in ("false", "0", "negative", "no")
+        else:
+            pol_b = bool(pol_val)
+        claim_obj = ClaimProposition(
+            subject=str(fm.get("claim_subject", "")).strip(),
+            predicate=str(fm.get("claim_predicate", "")).strip(),
+            object=str(fm.get("claim_object", "")).strip(),
+            polarity=pol_b,
+            claim_key=str(fm.get("claim_key", "")).strip(),
+        )
+
     known_keys = {
         "id", "kind", "status", "authority", "updated", "created_at", "confidence",
         "supersedes", "superseded_by", "freshness", "schema_version", "project_id",
@@ -238,7 +280,8 @@ def parse_markdown_record(path: Path, root: Path) -> KnowledgeRecord:
         "evidence_digest", "evidence_producer", "evidence_contains_redactions", "contains_redactions",
         "evidence_verification_state", "evidence_verified_at", "evidence_created_at",
         "evidence_observed_at", "evidence_timestamp", "evidence_source_refs", "source_type",
-        "source_ref", "observed_commit", "digest", "timestamp", "affected_symbols", "affected_tests"
+        "source_ref", "observed_commit", "digest", "timestamp", "affected_symbols", "affected_tests",
+        "claim", "claim_subject", "claim_predicate", "claim_object", "claim_polarity", "claim_key"
     }
     extra = {k: v for k, v in fm.items() if k not in known_keys}
 
@@ -252,6 +295,7 @@ def parse_markdown_record(path: Path, root: Path) -> KnowledgeRecord:
         body=content_body,
         evidence=evidence,
         identity=identity,
+        claim=claim_obj,
         confidence=float(fm.get("confidence", 1.0)),
         created_at=str(fm.get("created_at") or fm.get("timestamp") or ""),
         scope=scope,

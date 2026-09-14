@@ -80,14 +80,40 @@ def compile_context_pack(
         kind = fm.get("kind") or (rec_id.split("-")[0] if "-" in rec_id else "")
         title = first_heading(text) or fpath.stem
 
+        claim_raw = fm.get("claim")
+        claim_dict: dict[str, Any] = {}
+        if isinstance(claim_raw, dict):
+            claim_dict = dict(claim_raw)
+        elif hasattr(claim_raw, "to_dict"):
+            claim_dict = claim_raw.to_dict()
+        elif any(k in fm for k in ("claim_subject", "claim_predicate", "claim_object", "claim_key")):
+            pol_raw = fm.get("claim_polarity", True)
+            if isinstance(pol_raw, str):
+                pol_b = pol_raw.lower() not in ("false", "0", "negative", "no")
+            else:
+                pol_b = bool(pol_raw)
+            claim_dict = {
+                "subject": str(fm.get("claim_subject", "")).strip(),
+                "predicate": str(fm.get("claim_predicate", "")).strip(),
+                "object": str(fm.get("claim_object", "")).strip(),
+                "polarity": pol_b,
+                "claim_key": str(fm.get("claim_key", "")).strip() or str(fm.get("claim_subject", "")).strip(),
+            }
+
         if kind in ("decision", "requirement", "policy", "invariant", "ADR", "REQ", "POL", "INV"):
-            authoritative.append({
+            auth_entry = {
                 "id": rec_id,
                 "kind": kind,
                 "title": title,
                 "authority": fm.get("authority", "user_explicit"),
                 "body": body[:300].strip(),
-            })
+            }
+            if claim_dict:
+                auth_entry["claim"] = claim_dict
+                for ck in ("subject", "predicate", "object", "polarity", "claim_key"):
+                    if ck in claim_dict:
+                        auth_entry[ck] = claim_dict[ck]
+            authoritative.append(auth_entry)
             matched_record_paths.append(h["path"])
         elif kind in ("question", "Q"):
             questions.append({
@@ -105,7 +131,7 @@ def compile_context_pack(
             if isinstance(tech_symbols, str):
                 tech_symbols = [tech_symbols]
 
-            recorded_tech.append({
+            tech_entry = {
                 "id": rec_id,
                 "kind": kind,
                 "title": title,
@@ -119,7 +145,13 @@ def compile_context_pack(
                 "observed_commit": fm.get("evidence_observed_commit") or fm.get("observed_commit") or "",
                 "freshness": fm.get("freshness", "fresh"),
                 "verification_state": fm.get("evidence_verification_state") or fm.get("verification_state", "unverified"),
-            })
+            }
+            if claim_dict:
+                tech_entry["claim"] = claim_dict
+                for ck in ("subject", "predicate", "object", "polarity", "claim_key"):
+                    if ck in claim_dict:
+                        tech_entry[ck] = claim_dict[ck]
+            recorded_tech.append(tech_entry)
             matched_record_paths.append(h["path"])
             if fm.get("freshness") in ("possibly_stale", "stale", "contradicted", "branch_diverged"):
                 staleness_alerts.append({

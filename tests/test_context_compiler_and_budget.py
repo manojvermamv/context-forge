@@ -352,6 +352,19 @@ class TestContextCompilerAndBudget(unittest.TestCase):
         with self.assertRaises(ContextBudgetError):
             pack.finalize_budget(50)
 
+    def test_allocator_strict_impossible_budget_raises_error(self) -> None:
+        """allocate_context_budget must propagate ContextBudgetError directly on impossible budget."""
+        sections = {
+            "authoritative_intent": [
+                {"id": "REQ-001", "title": "Mandatory Requirement", "authority": "user_explicit", "body": "Critical requirement"}
+            ],
+            "conflicts_and_staleness": [
+                {"type": "VIOLATION", "canonical_id": "REQ-001", "path": "src/risk.py", "warning": "Critical risk bypass"}
+            ],
+        }
+        with self.assertRaises(ContextBudgetError):
+            allocate_context_budget(sections, max_budget=40, task="Impossible budget task")
+
 
 if __name__ == "__main__":
     unittest.main()

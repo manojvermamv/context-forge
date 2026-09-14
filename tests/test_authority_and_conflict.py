@@ -319,6 +319,139 @@ class AuthorityAndConflictTestCase(unittest.TestCase):
         self.assertFalse(res.claims_conflict, "Disparate technologies must not be manufactured into conflict")
         self.assertNotEqual(res.disposition, ResolutionDisposition.ADVICE_REJECTED)
 
+    def test_unstructured_false_positive_prevention(self):
+        """Unbound negation words like 'without' must not create false DRIFT against unrelated subjects."""
+        req = {
+            "id": "REQ-040",
+            "kind": "requirement",
+            "authority": "user_explicit",
+            "title": "RiskGate must be used",
+            "body": "RiskGate is mandatory on all request execution paths.",
+            "scope": ["src/execution.py"],
+        }
+        impl = {
+            "path": "src/execution.py",
+            "kind": "technical",
+            "authority": "code_observed",
+            "details": "Request proceeds without allocating a temporary buffer.",
+        }
+        res = EpistemicAuthority.resolve_claims(req, impl)
+        self.assertFalse(res.claims_conflict, "Unbound 'without' must not trigger DRIFT")
+        self.assertNotEqual(res.disposition, ResolutionDisposition.DRIFT)
+
+        drifts = ConflictResolver.detect_code_drift([req], [impl])
+        self.assertEqual(len(drifts), 0, "No drift alert should be raised for unrelated 'without'")
+
+    def test_durable_structured_claim_round_trip(self):
+        """ClaimProposition survives Markdown frontmatter write, read, and serialization round-trip."""
+        from context_forge.core.models import ClaimProposition
+        from context_forge.store.markdown import parse_markdown_record
+
+        claim = ClaimProposition(
+            subject="RiskGate",
+            predicate="required_on_path",
+            object="execution/*",
+            polarity=True,
+            claim_key="RiskGate",
+        )
+        ret = create_knowledge_record(
+            repo=self.tmp,
+            kind="requirement",
+            title="RiskGate Execution Rule",
+            body="RiskGate is required.",
+            authority="user_explicit",
+            evidence="Audit rule",
+            scope=["src/execution.py"],
+            claim=claim,
+            accept=True,
+        )
+        self.assertEqual(ret, 0)
+
+        # Locate and parse created record from disk
+        req_files = list(self.p["requirements"].glob("*.md"))
+        self.assertEqual(len(req_files), 1)
+        rec_path = req_files[0]
+        parsed = parse_markdown_record(rec_path, self.p["root"])
+        self.assertIsNotNone(parsed.claim)
+        self.assertEqual(parsed.claim.subject, "RiskGate")
+        self.assertEqual(parsed.claim.predicate, "required_on_path")
+        self.assertEqual(parsed.claim.object, "execution/*")
+        self.assertTrue(parsed.claim.polarity)
+        self.assertEqual(parsed.claim.claim_key, "RiskGate")
+
+        # Round-trip markdown text
+        md_text = parsed.to_markdown()
+        (self.tmp / "test_rec.md").write_text(md_text, encoding="utf-8")
+        re_parsed = parse_markdown_record(self.tmp / "test_rec.md", self.tmp)
+        self.assertIsNotNone(re_parsed.claim)
+        self.assertEqual(re_parsed.claim.subject, "RiskGate")
+        self.assertEqual(re_parsed.claim.polarity, True)
+
+    def test_compiler_propagates_canonical_structured_claims(self):
+        """compile_context_pack extracts structured claims from Markdown records and feeds resolve_claims."""
+        from context_forge.compiler.pack import compile_context_pack
+
+        # Write canonical requirement with structured claim
+        req_text = (
+            "---\n"
+            "id: REQ-050\n"
+            "kind: requirement\n"
+            "authority: user_explicit\n"
+            "scope:\n"
+            "  - src/execution.py\n"
+            "claim:\n"
+            "  subject: RiskGate\n"
+            "  predicate: required_on_path\n"
+            "  object: execution/*\n"
+            "  polarity: true\n"
+            "---\n"
+            "# RiskGate Guard\n"
+            "RiskGate is mandatory on all execution paths.\n"
+        )
+        req_file = self.p["requirements"] / "REQ-050-riskgate.md"
+        req_file.parent.mkdir(parents=True, exist_ok=True)
+        req_file.write_text(req_text, encoding="utf-8")
+
+        # Also write recorded technical fact with conflicting claim (polarity=False)
+        tech_text = (
+            "---\n"
+            "id: TECH-050\n"
+            "kind: technical\n"
+            "authority: code_observed\n"
+            "scope:\n"
+            "  - src/execution.py\n"
+            "claim:\n"
+            "  subject: RiskGate\n"
+            "  predicate: required_on_path\n"
+            "  object: execution/*\n"
+            "  polarity: false\n"
+            "---\n"
+            "# Execution Implementation\n"
+            "Direct execution path implemented.\n"
+        )
+        tech_file = self.p["technical"] / "TECH-050-execution.md"
+        tech_file.parent.mkdir(parents=True, exist_ok=True)
+        tech_file.write_text(tech_text, encoding="utf-8")
+
+        pack = compile_context_pack(self.tmp, "execution", ["src/execution.py"])
+        # Should detect DRIFT between REQ-050 and TECH-050 due to opposing polarity!
+        drift_alerts = [
+            a for a in pack.conflicts_and_staleness
+            if "DRIFT" in str(a.get("type", "")).upper() or "DRIFT" in str(a.get("warning", "")).upper()
+        ]
+        self.assertGreaterEqual(len(drift_alerts), 1, "Compiler must detect DRIFT from opposing structured claims")
+
+        # Now change TECH-050 polarity to true -> no drift
+        tech_text_agree = tech_text.replace("polarity: false", "polarity: true")
+        tech_file.write_text(tech_text_agree, encoding="utf-8")
+
+        pack_agree = compile_context_pack(self.tmp, "execution", ["src/execution.py"])
+        drift_alerts_agree = [
+            a for a in pack_agree.conflicts_and_staleness
+            if "DRIFT" in str(a.get("type", "")).upper() or "DRIFT" in str(a.get("warning", "")).upper()
+        ]
+        self.assertEqual(len(drift_alerts_agree), 0, "No drift should be raised when structured claims agree")
+
 
 if __name__ == "__main__":
     unittest.main()

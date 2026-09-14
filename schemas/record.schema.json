@@ -90,6 +90,26 @@
     "path": {
       "type": "string"
     },
+    "claim": {
+      "type": ["object", "null"],
+      "description": "Structured proposition for deterministic semantic conflict resolution.",
+      "properties": {
+        "subject": { "type": "string" },
+        "predicate": { "type": "string" },
+        "object": { "type": "string" },
+        "polarity": { "type": "boolean" },
+        "claim_key": { "type": "string" },
+        "qualifiers": { "type": "object" },
+        "scope": { "type": "array", "items": { "type": "string" } },
+        "confidence": { "type": "number" }
+      },
+      "required": ["subject", "predicate", "object"]
+    },
+    "claim_subject": { "type": "string" },
+    "claim_predicate": { "type": "string" },
+    "claim_object": { "type": "string" },
+    "claim_polarity": { "type": ["boolean", "string"] },
+    "claim_key": { "type": "string" },
     "extra_frontmatter": {
       "type": "object"
     }

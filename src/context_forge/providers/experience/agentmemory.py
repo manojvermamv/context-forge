@@ -40,7 +40,14 @@ class AgentMemoryProvider(ExperienceProvider):
         return headers
 
     def check_health(self) -> ProviderResult:
-        """Query GET /agentmemory/health to establish status, version, and auth strictly without false defaults."""
+        """Query GET /agentmemory/health to establish status, version, and auth strictly.
+
+        Identity contract:
+          Validates either:
+          1. Explicit service identity ('agentmemory' or 'agent-memory' in service/name/app fields), OR
+          2. Capability-based identity for compatible versions (e.g. 'smart-search', 'memories', 'search'),
+          while strictly rejecting any explicitly conflicting service name (e.g. 'nginx').
+        """
         t0 = time.monotonic()
         try:
             req = urllib.request.Request(
@@ -355,3 +362,65 @@ class AgentMemoryProvider(ExperienceProvider):
             data=[],
             diagnostic="AgentMemory search endpoints (/agentmemory/smart-search, /agentmemory/search) not found.",
         )
+
+    def remember(
+        self,
+        content: str,
+        concepts: Optional[list[str]] = None,
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> ProviderResult:
+        """Store an experiential lesson via POST /agentmemory/remember."""
+        t0 = time.monotonic()
+        data: dict[str, Any] = {"content": content}
+        if concepts:
+            data["concepts"] = concepts
+        if metadata:
+            data["metadata"] = metadata
+
+        payload = json.dumps(data).encode("utf-8")
+        try:
+            req = urllib.request.Request(
+                f"{self.endpoint_url}/agentmemory/remember",
+                data=payload,
+                headers=self._headers(),
+            )
+            with urllib.request.urlopen(req, timeout=3.0) as resp:
+                elapsed_ms = (time.monotonic() - t0) * 1000
+                raw_text = resp.read().decode("utf-8")
+                try:
+                    parsed = json.loads(raw_text)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    parsed = {"status": "ok", "raw": raw_text}
+                return ProviderResult(
+                    status=ProviderStatus.OK,
+                    provider=self.name(),
+                    data=parsed,
+                    diagnostic="Memory stored successfully in AgentMemory.",
+                    execution_time_ms=elapsed_ms,
+                )
+        except urllib.error.HTTPError as exc:
+            elapsed_ms = (time.monotonic() - t0) * 1000
+            if exc.code in (401, 403):
+                return ProviderResult(
+                    status=ProviderStatus.UNAUTHORIZED,
+                    provider=self.name(),
+                    diagnostic_code="REMEMBER_UNAUTHORIZED",
+                    diagnostic=f"AgentMemory /remember unauthorized (HTTP {exc.code}).",
+                    execution_time_ms=elapsed_ms,
+                )
+            return ProviderResult(
+                status=ProviderStatus.ERROR,
+                provider=self.name(),
+                diagnostic_code=f"HTTP_{exc.code}",
+                diagnostic=screen_secrets(f"AgentMemory /remember HTTP {exc.code}: {exc.reason}"),
+                execution_time_ms=elapsed_ms,
+            )
+        except Exception as exc:
+            elapsed_ms = (time.monotonic() - t0) * 1000
+            return ProviderResult(
+                status=ProviderStatus.ERROR,
+                provider=self.name(),
+                diagnostic_code="REMEMBER_EXCEPTION",
+                diagnostic=screen_secrets(f"Failed to call AgentMemory /remember: {exc}"),
+                execution_time_ms=elapsed_ms,
+            )

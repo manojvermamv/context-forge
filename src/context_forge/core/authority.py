@@ -317,15 +317,20 @@ class EpistemicAuthority:
             disp = ResolutionDisposition.VIOLATION if is_violation else ResolutionDisposition.DRIFT
 
             # Check normalized structured propositions
-            subj_i = intent_item.get("subject") or intent_item.get("claim_key")
-            subj_c = code_item.get("subject") or code_item.get("claim_key")
+            subj_i = intent_item.get("subject") or intent_item.get("claim_key") or (intent_item.get("claim", {}).get("subject") if isinstance(intent_item.get("claim"), dict) else getattr(intent_item.get("claim"), "subject", None))
+            subj_c = code_item.get("subject") or code_item.get("claim_key") or (code_item.get("claim", {}).get("subject") if isinstance(code_item.get("claim"), dict) else getattr(code_item.get("claim"), "subject", None))
             if subj_i and subj_c and str(subj_i).lower() == str(subj_c).lower():
                 pol_i = intent_item.get("polarity", True)
+                if isinstance(intent_item.get("claim"), dict) and "polarity" in intent_item["claim"]:
+                    pol_i = intent_item["claim"]["polarity"]
                 pol_c = code_item.get("polarity", True)
-                obj_i = str(intent_item.get("object", "")).lower()
-                obj_c = str(code_item.get("object", "")).lower()
-                pred_i = str(intent_item.get("predicate", "")).lower()
-                pred_c = str(code_item.get("predicate", "")).lower()
+                if isinstance(code_item.get("claim"), dict) and "polarity" in code_item["claim"]:
+                    pol_c = code_item["claim"]["polarity"]
+
+                obj_i = str(intent_item.get("object") or (intent_item.get("claim", {}).get("object") if isinstance(intent_item.get("claim"), dict) else "")).lower()
+                obj_c = str(code_item.get("object") or (code_item.get("claim", {}).get("object") if isinstance(code_item.get("claim"), dict) else "")).lower()
+                pred_i = str(intent_item.get("predicate") or (intent_item.get("claim", {}).get("predicate") if isinstance(intent_item.get("claim"), dict) else "")).lower()
+                pred_c = str(code_item.get("predicate") or (code_item.get("claim", {}).get("predicate") if isinstance(code_item.get("claim"), dict) else "")).lower()
 
                 if pol_i != pol_c or (obj_i and obj_c and obj_i != obj_c):
                     return AuthorityResolution(
@@ -349,11 +354,62 @@ class EpistemicAuthority:
                         reason="Implementation aligns with authoritative structured proposition.",
                     )
 
-            # Check if code violates or bypasses intent/policy
-            violates = any(b in code_text for b in ("bypass", "skips", "missing", "violat", "omits", "without", "disables", "non-compliant", "breach"))
-            forbid_breached = any(f in intent_text for f in ("forbidden", "prohibited", "disallowed", "cannot", "must not")) and any(u in code_text for u in ("calls", "uses", "contains", "invokes"))
+            # Phase 1: Identify intent subjects and scope
+            intent_subjects: set[str] = set()
+            if intent_item.get("id"):
+                intent_subjects.add(str(intent_item["id"]).lower())
+            if subj_i:
+                intent_subjects.add(str(subj_i).lower())
+            for sym in (intent_item.get("symbols") or ([intent_item["symbol"]] if "symbol" in intent_item else [])):
+                intent_subjects.add(str(sym).lower())
+            raw_intent = intent_item.get("title", "") + " " + intent_item.get("body", "")
+            for token in re.findall(r"\b[A-Za-z][A-Za-z0-9_-]{2,30}\b", intent_item.get("title", "")):
+                if token.lower() not in {"must", "should", "with", "from", "that", "this", "have", "will", "and", "the", "for", "not", "into", "onto", "about"}:
+                    intent_subjects.add(token.lower())
+            for acr in re.findall(r"\b[A-Z]{2,10}\b", raw_intent):
+                if acr.lower() not in {"all", "and", "the", "for", "not", "adr", "req", "pol", "inv"}:
+                    intent_subjects.add(acr.lower())
+            for camel in re.findall(r"\b[A-Z][a-z0-9]+[A-Z][A-Za-z0-9]*\b", raw_intent):
+                intent_subjects.add(camel.lower())
+            for mand in re.findall(r"\b(?:enforce|enforces|require|requires|mandate|mandates|use|uses)\s+([A-Za-z0-9_-]{2,20})\b", raw_intent, re.IGNORECASE):
+                if mand.lower() not in {"that", "this", "all", "the", "a", "an", "any"}:
+                    intent_subjects.add(mand.lower())
 
-            if violates or forbid_breached:
+            # Phase 2: Conservative fallback for unstructured claims
+            # Contradiction requires BOTH:
+            # 1. Subject relevance (code mentions intent subject, or shares scope/symbol)
+            # 2. Contradiction expression is explicitly bound to the subject (e.g. "without RiskGate")
+            # Unbound negation words ("without allocating a temporary buffer") must NEVER create false DRIFT.
+            bound_violation = False
+            violation_evidence = ""
+            negation_verbs = r"(?:without|bypass(?:ing|ed|es)?|skips?|missing|disables?|omits?|breach(?:es|ed)?|violat(?:es|ed|ing)?)"
+
+            for subj in intent_subjects:
+                if not subj or len(subj) < 3:
+                    continue
+                p1 = rf"\b{negation_verbs}\s+(?:\w+\s+){{0,3}}{re.escape(subj)}\b"
+                p2 = rf"\b{re.escape(subj)}\s+(?:\w+\s+){{0,3}}(?:bypassed|missing|disabled|omitted|skipped|breached|violated)\b"
+                m1 = re.search(p1, code_text)
+                m2 = re.search(p2, code_text)
+                if m1:
+                    bound_violation = True
+                    violation_evidence = m1.group(0)
+                    break
+                if m2:
+                    bound_violation = True
+                    violation_evidence = m2.group(0)
+                    break
+
+            forbid_breached = False
+            for f in ("forbidden", "prohibited", "disallowed", "cannot", "must not"):
+                if f in intent_text:
+                    for subj in intent_subjects:
+                        if subj and subj in code_text and any(u in code_text for u in ("calls", "uses", "contains", "invokes")):
+                            forbid_breached = True
+                            violation_evidence = f"Forbidden subject '{subj}' is invoked or used."
+                            break
+
+            if bound_violation or forbid_breached:
                 return AuthorityResolution(
                     disposition=disp,
                     domain_a=domain_a,
@@ -362,12 +418,12 @@ class EpistemicAuthority:
                     winner=None,
                     preserved_claims=[intent_item, code_item],
                     reason=f"{'VIOLATION' if is_violation else 'DRIFT'}: Implementation diverges from {intent_item.get('id')}.",
-                    evidence=f"Code evidence shows divergence: {code_text[:120]}",
+                    evidence=f"Code evidence shows divergence: {violation_evidence or code_text[:120]}",
                     reconciliation_required=True,
                 )
 
-            # Implementation in same scope that does NOT violate: AGREES
-            if has_scope_overlap or any(t in code_text for t in re.findall(r"\b[a-zA-Z0-9_-]{4,30}\b", intent_text)):
+            # Implementation in same scope or sharing subject that does NOT violate: AGREES
+            if has_scope_overlap or any(subj in code_text for subj in intent_subjects):
                 return AuthorityResolution(
                     disposition=ResolutionDisposition.AGREES,
                     domain_a=domain_a,

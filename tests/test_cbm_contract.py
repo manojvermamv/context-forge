@@ -38,7 +38,27 @@ class TestCBMContract(unittest.TestCase):
                 '    print("0.10.8")\n'
                 'elif len(sys.argv) >= 3 and sys.argv[1] == "cli":\n'
                 '    tool = sys.argv[2]\n'
-                '    args = json.loads(sys.argv[3]) if len(sys.argv) > 3 else {}\n'
+                '    args = {}\n'
+                '    i = 3\n'
+                '    while i < len(sys.argv):\n'
+                '        arg = sys.argv[i]\n'
+                '        if arg.startswith("--"):\n'
+                '            k = arg[2:].replace("-", "_")\n'
+                '            if i + 1 < len(sys.argv) and not sys.argv[i+1].startswith("--"):\n'
+                '                v = sys.argv[i+1]\n'
+                '                try: v = json.loads(v)\n'
+                '                except Exception: pass\n'
+                '                args[k] = v\n'
+                '                i += 2\n'
+                '            else:\n'
+                '                args[k] = True\n'
+                '                i += 1\n'
+                '        elif arg.startswith("{"):\n'
+                '            try: args.update(json.loads(arg))\n'
+                '            except Exception: pass\n'
+                '            i += 1\n'
+                '        else:\n'
+                '            i += 1\n'
                 '    if tool == "list_projects":\n'
                 f'        print(json.dumps([{{\n'
                 f'            "name": "my-project-id",\n'
@@ -47,6 +67,8 @@ class TestCBMContract(unittest.TestCase):
                 '    elif tool == "search_graph":\n'
                 '        assert args.get("project") == "my-project-id", "project arg required"\n'
                 '        print(json.dumps([{"name": "AuthService", "path": "src/auth.py", "signature": "class AuthService"}]))\n'
+                '    elif tool == "index_status":\n'
+                '        print(json.dumps({"status": "ready"}))\n'
                 '    elif tool == "index_repository":\n'
                 '        print(json.dumps({"status": "indexed"}))\n'
                 '    else:\n'
@@ -103,7 +125,27 @@ class TestCBMContract(unittest.TestCase):
                 '    print("0.10.8")\n'
                 'elif len(sys.argv) >= 3 and sys.argv[1] == "cli":\n'
                 '    tool = sys.argv[2]\n'
-                '    args = json.loads(sys.argv[3]) if len(sys.argv) > 3 else {}\n'
+                '    args = {}\n'
+                '    i = 3\n'
+                '    while i < len(sys.argv):\n'
+                '        arg = sys.argv[i]\n'
+                '        if arg.startswith("--"):\n'
+                '            k = arg[2:].replace("-", "_")\n'
+                '            if i + 1 < len(sys.argv) and not sys.argv[i+1].startswith("--"):\n'
+                '                v = sys.argv[i+1]\n'
+                '                try: v = json.loads(v)\n'
+                '                except Exception: pass\n'
+                '                args[k] = v\n'
+                '                i += 2\n'
+                '            else:\n'
+                '                args[k] = True\n'
+                '                i += 1\n'
+                '        elif arg.startswith("{"):\n'
+                '            try: args.update(json.loads(arg))\n'
+                '            except Exception: pass\n'
+                '            i += 1\n'
+                '        else:\n'
+                '            i += 1\n'
                 '    if tool == "list_projects":\n'
                 f'        print(json.dumps([{{\n'
                 f'            "name": "rel-proj-id",\n'
@@ -164,7 +206,27 @@ class TestCBMContract(unittest.TestCase):
                 '    print("0.10.8")\n'
                 'elif len(sys.argv) >= 3 and sys.argv[1] == "cli":\n'
                 '    tool = sys.argv[2]\n'
-                '    args = json.loads(sys.argv[3]) if len(sys.argv) > 3 else {}\n'
+                '    args = {}\n'
+                '    i = 3\n'
+                '    while i < len(sys.argv):\n'
+                '        arg = sys.argv[i]\n'
+                '        if arg.startswith("--"):\n'
+                '            k = arg[2:].replace("-", "_")\n'
+                '            if i + 1 < len(sys.argv) and not sys.argv[i+1].startswith("--"):\n'
+                '                v = sys.argv[i+1]\n'
+                '                try: v = json.loads(v)\n'
+                '                except Exception: pass\n'
+                '                args[k] = v\n'
+                '                i += 2\n'
+                '            else:\n'
+                '                args[k] = True\n'
+                '                i += 1\n'
+                '        elif arg.startswith("{"):\n'
+                '            try: args.update(json.loads(arg))\n'
+                '            except Exception: pass\n'
+                '            i += 1\n'
+                '        else:\n'
+                '            i += 1\n'
                 '    if tool == "list_projects":\n'
                 f'        print(json.dumps([{{\n'
                 f'            "name": "my-actual-repo-id",\n'
@@ -184,7 +246,7 @@ class TestCBMContract(unittest.TestCase):
             else:
                 mock_exe = tmp_dir / "mock_cbm"
                 mock_exe.write_text(f'#!/bin/sh\n"{sys.executable}" "{runner}" "$@"\n', encoding="utf-8")
-                mock_exe.chmod(mock_exe.stat().S_IEXEC | stat.S_IEXEC)
+                mock_exe.chmod(mock_exe.stat().st_mode | stat.S_IEXEC)
 
             cbm = CodebaseMemoryMCPProvider(executable_path=str(mock_exe))
 
@@ -297,18 +359,56 @@ class TestCBMContract(unittest.TestCase):
         if os.environ.get("RUN_CBM_LIVE_TESTS") != "1":
             self.skipTest("Live CBM tests not enabled. Set RUN_CBM_LIVE_TESTS=1 to run.")
 
-        cbm = CodebaseMemoryMCPProvider()
+        cbm = CodebaseMemoryMCPProvider(auto_index=True)
         health = cbm.check_health()
         if not health.is_ok():
             self.fail(f"Live CBM binary not available: {health.diagnostic}")
 
-        root = Path(__file__).resolve().parents[1]
-        res = cbm.query_impact_result(repo_path=root, query="ContextPack", scope_paths=["src/context_forge/core/models.py"])
-        self.assertIn(
-            res.status,
-            (ProviderStatus.OK, ProviderStatus.NO_RESULTS, ProviderStatus.UNINDEXED),
-            f"Live CBM query failed unexpectedly: {res.diagnostic}",
-        )
+        import subprocess
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture_repo = Path(tmp)
+            subprocess.run(["git", "init"], cwd=fixture_repo, capture_output=True, check=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=fixture_repo, capture_output=True, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=fixture_repo, capture_output=True, check=True)
+
+            code_file = fixture_repo / "payment.py"
+            code_file.write_text(
+                "class PaymentGateway:\n"
+                "    def process_payment(self, amount: float) -> bool:\n"
+                "        raise NotImplementedError\n\n"
+                "class StripeGateway(PaymentGateway):\n"
+                "    def process_payment(self, amount: float) -> bool:\n"
+                "        return True\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "payment.py"], cwd=fixture_repo, capture_output=True, check=True)
+            subprocess.run(["git", "commit", "-m", "initial commit"], cwd=fixture_repo, capture_output=True, check=True)
+
+            proj_name, err = cbm.resolve_project(fixture_repo, allow_index=True)
+            if err or not proj_name:
+                self.fail(f"Live CBM failed to index and resolve fixture project: {err.diagnostic if err else 'unknown'}")
+
+            res = cbm.verify_reference(
+                repo_path=fixture_repo,
+                path="payment.py",
+                symbol="StripeGateway",
+                relationship="inherits",
+            )
+            if res.status == ProviderStatus.UNINDEXED:
+                self.fail("Live CBM E2E cannot pass with UNINDEXED status")
+            if res.status == ProviderStatus.NO_RESULTS:
+                self.fail("Live CBM E2E probe failed: known symbol 'StripeGateway' returned NO_RESULTS")
+            if not res.is_ok():
+                self.fail(f"Live CBM verify_reference failed: {res.diagnostic}")
+
+            self.assertTrue(
+                res.data.get("symbol_verified") or res.data.get("structurally_verified"),
+                "Live CBM must produce verified symbol or structural evidence",
+            )
+
+            from context_forge.compiler.pack import compile_context_pack
+            pack = compile_context_pack(fixture_repo, task_query="Payment processing", paths=["payment.py"])
+            self.assertIsNotNone(pack)
 
 
 if __name__ == "__main__":

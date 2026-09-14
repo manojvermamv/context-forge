@@ -69,6 +69,10 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
     def name(self) -> str:
         return "codebase_memory_mcp"
 
+    def adapter_capabilities(self) -> list[str]:
+        """Return list of capabilities/tools supported by this Context Forge adapter."""
+        return list(self.DEFAULT_TOOLS)
+
     def _resolve_executable(self) -> Optional[Path]:
         """Locate codebase-memory-mcp native executable or PyPI shim."""
         if self.executable_path:
@@ -123,10 +127,10 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
                     status=ProviderStatus.OK,
                     provider=self.name(),
                     version=version,
-                    capabilities=self.DEFAULT_TOOLS,
+                    capabilities=[],  # Discovered capabilities; distinct from adapter-known tools
                     data={
-                        "adapter_supported_capabilities": self.DEFAULT_TOOLS,
-                        "discovered_capabilities": "unqueried",
+                        "adapter_supported_capabilities": list(self.DEFAULT_TOOLS),
+                        "discovered_capabilities": [],
                     },
                     diagnostic=f"CBM CLI ready at {exe}",
                     execution_time_ms=elapsed_ms,
@@ -157,22 +161,50 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
         return self.check_health().is_ok()
 
     def run_tool(self, tool_name: str, args: dict[str, Any], timeout: float = 6.0) -> ProviderResult:
-        """Execute a CBM tool via codebase-memory-mcp cli <tool> <args_json> with secret screening."""
+        """Execute a CBM tool via modern machine CLI flags (with fallback to inline JSON for legacy CBM) and secret screening."""
         exe = self._resolve_executable()
         if not exe:
             return self.check_health()
 
         t0 = time.monotonic()
         try:
-            args_json = json.dumps(args)
+            # Construct modern CLI command with machine-readable flags
+            cmd = [str(exe), "cli", tool_name]
+            for k, v in args.items():
+                if v is None:
+                    continue
+                flag = "--" + k.replace("_", "-")
+                if isinstance(v, bool):
+                    if v:
+                        cmd.append(flag)
+                elif isinstance(v, (int, float, str)):
+                    cmd.extend([flag, str(v)])
+                elif isinstance(v, (list, dict)):
+                    cmd.extend([flag, json.dumps(v)])
+
             res = subprocess.run(
-                [str(exe), "cli", tool_name, args_json],
+                cmd,
                 capture_output=True,
                 text=True,
                 timeout=timeout,
                 check=False,
             )
             elapsed_ms = (time.monotonic() - t0) * 1000
+
+            # Compatibility fallback for older CBM binaries that only accept positional inline JSON
+            if res.returncode != 0 and any(err_kw in res.stderr.lower() for err_kw in ("unrecognized argument", "unknown option", "unexpected argument")):
+                args_json = json.dumps(args)
+                fb_res = subprocess.run(
+                    [str(exe), "cli", tool_name, args_json],
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    check=False,
+                )
+                if fb_res.returncode == 0 or "unknown option" not in fb_res.stderr.lower():
+                    res = fb_res
+                    elapsed_ms = (time.monotonic() - t0) * 1000
+
             if res.returncode == 0:
                 out = res.stdout.strip()
                 try:
@@ -254,21 +286,56 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
 
         # Project not found in CBM
         if self.auto_index and allow_index:
-            idx_res = self.run_tool("index_repository", {"repo_path": str(Path(repo_path).resolve())}, timeout=15.0)
-            if idx_res.is_ok():
-                # Re-query list_projects once or bounded poll
-                for _ in range(3):
-                    list_res2 = self.run_tool("list_projects", {})
-                    if list_res2.is_ok() and isinstance(list_res2.data, (list, dict)):
-                        projs2 = list_res2.data if isinstance(list_res2.data, list) else list_res2.data.get("projects", [])
-                        for proj in projs2:
-                            if isinstance(proj, dict):
-                                p_path = proj.get("root_path") or proj.get("path") or ""
-                                p_name = proj.get("name") or proj.get("project") or ""
-                                if p_path and p_name and normalize_repo_path(p_path) == norm_target:
-                                    self._project_cache[norm_target] = (p_name, now)
-                                    return p_name, None
-                    time.sleep(0.3)
+            idx_res = self.run_tool("index_repository", {"repo_path": str(Path(repo_path).resolve())}, timeout=30.0)
+            if not idx_res.is_ok():
+                return None, idx_res
+
+            # Try to resolve project identity
+            proj_name = None
+            if isinstance(idx_res.data, dict):
+                proj_name = idx_res.data.get("project") or idx_res.data.get("name") or idx_res.data.get("id")
+
+            if not proj_name:
+                list_res2 = self.run_tool("list_projects", {})
+                if list_res2.is_ok() and isinstance(list_res2.data, (list, dict)):
+                    projs2 = list_res2.data if isinstance(list_res2.data, list) else list_res2.data.get("projects", [])
+                    for proj in projs2:
+                        if isinstance(proj, dict):
+                            p_path = proj.get("root_path") or proj.get("path") or ""
+                            p_name = proj.get("name") or proj.get("project") or ""
+                            if p_path and p_name and normalize_repo_path(p_path) == norm_target:
+                                proj_name = p_name
+                                break
+
+            if proj_name:
+                t_poll_start = time.monotonic()
+                poll_timeout = 15.0
+                while time.monotonic() - t_poll_start < poll_timeout:
+                    status_res = self.run_tool("index_status", {"project": proj_name}, timeout=10.0)
+                    if status_res.is_ok() and isinstance(status_res.data, dict):
+                        st_val = str(status_res.data.get("status", "")).lower()
+                        if st_val in ("ready", "indexed", "complete", "ok"):
+                            self._project_cache[norm_target] = (proj_name, now)
+                            return proj_name, None
+                        elif st_val in ("indexing", "building", "in_progress", "pending"):
+                            time.sleep(0.5)
+                            continue
+                        elif st_val in ("error", "failed"):
+                            return None, ProviderResult(
+                                status=ProviderStatus.ERROR,
+                                provider=self.name(),
+                                diagnostic_code="INDEX_STATUS_FAILED",
+                                diagnostic=f"CBM index_status reported failed for project '{proj_name}': {status_res.data}",
+                            )
+                    elif status_res.status == ProviderStatus.ERROR and any(w in (status_res.diagnostic or "").lower() for w in ("not supported", "unknown tool")):
+                        # index_status tool not supported on older CBM, assume completion
+                        self._project_cache[norm_target] = (proj_name, now)
+                        return proj_name, None
+                    else:
+                        break
+
+                self._project_cache[norm_target] = (proj_name, now)
+                return proj_name, None
 
         return None, ProviderResult(
             status=ProviderStatus.UNINDEXED,
@@ -441,8 +508,15 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
                     project_name=project_name,
                     data={
                         "verification_kind": VerificationKind.STRUCTURAL_GRAPH.value,
+                        "reference_verified": True,
+                        "symbol_verified": True if symbol else False,
+                        "relationship_requested": True,
+                        "relationship_verified": True,
                         "structurally_verified": True,
                         "confidence": verification_confidence(VerificationKind.STRUCTURAL_GRAPH),
+                        "reference_confidence": 0.95,
+                        "relationship_confidence": 0.95,
+                        "edge_confidence": 0.95,
                         "path": path,
                         "symbol": symbol,
                         "relationship": relationship,
@@ -457,8 +531,15 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
                     project_name=project_name,
                     data={
                         "verification_kind": VerificationKind.SYMBOL_GRAPH.value,
+                        "reference_verified": True,
+                        "symbol_verified": True,
+                        "relationship_requested": True,
+                        "relationship_verified": False,
                         "structurally_verified": False,
                         "confidence": verification_confidence(VerificationKind.SYMBOL_GRAPH),
+                        "reference_confidence": 0.90,
+                        "relationship_confidence": 0.0,
+                        "edge_confidence": 0.50,
                         "path": path,
                         "symbol": symbol,
                         "relationship": relationship,
@@ -476,8 +557,15 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
                         project_name=project_name,
                         data={
                             "verification_kind": VerificationKind.FILESYSTEM.value,
+                            "reference_verified": True,
+                            "symbol_verified": False,
+                            "relationship_requested": True,
+                            "relationship_verified": False,
                             "structurally_verified": False,
                             "confidence": verification_confidence(VerificationKind.FILESYSTEM),
+                            "reference_confidence": 0.50,
+                            "relationship_confidence": 0.0,
+                            "edge_confidence": 0.0,
                             "path": path,
                             "symbol": symbol,
                             "relationship": relationship,
@@ -519,8 +607,15 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
                     project_name=project_name,
                     data={
                         "verification_kind": VerificationKind.SYMBOL_GRAPH.value,
+                        "reference_verified": True,
+                        "symbol_verified": True,
+                        "relationship_requested": False,
+                        "relationship_verified": False,
                         "structurally_verified": False,
                         "confidence": verification_confidence(VerificationKind.SYMBOL_GRAPH),
+                        "reference_confidence": 0.90,
+                        "relationship_confidence": 0.0,
+                        "edge_confidence": 0.90,
                         "symbol": symbol,
                         "path": path,
                         "nodes": nodes,
@@ -541,8 +636,15 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
                     project_name=project_name,
                     data={
                         "verification_kind": VerificationKind.TEXT_SEARCH.value,
+                        "reference_verified": True,
+                        "symbol_verified": True,
+                        "relationship_requested": False,
+                        "relationship_verified": False,
                         "structurally_verified": False,
                         "confidence": verification_confidence(VerificationKind.TEXT_SEARCH),
+                        "reference_confidence": 0.70,
+                        "relationship_confidence": 0.0,
+                        "edge_confidence": 0.70,
                         "symbol": symbol,
                         "path": path,
                         "matches": code_res.data,
@@ -558,8 +660,15 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
                     project_name=project_name,
                     data={
                         "verification_kind": VerificationKind.FILESYSTEM.value,
+                        "reference_verified": True,
+                        "symbol_verified": False,
+                        "relationship_requested": False,
+                        "relationship_verified": False,
                         "structurally_verified": False,
                         "confidence": verification_confidence(VerificationKind.FILESYSTEM),
+                        "reference_confidence": 0.50,
+                        "relationship_confidence": 0.0,
+                        "edge_confidence": 0.50,
                         "symbol": symbol,
                         "path": path,
                     },
@@ -587,8 +696,15 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
                     project_name=project_name,
                     data={
                         "verification_kind": VerificationKind.TEXT_SEARCH.value,
+                        "reference_verified": True,
+                        "symbol_verified": False,
+                        "relationship_requested": False,
+                        "relationship_verified": False,
                         "structurally_verified": False,
                         "confidence": verification_confidence(VerificationKind.TEXT_SEARCH),
+                        "reference_confidence": 0.70,
+                        "relationship_confidence": 0.0,
+                        "edge_confidence": 0.70,
                         "path": path,
                         "matches": res.data,
                     },
@@ -602,8 +718,15 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
                     project_name=project_name,
                     data={
                         "verification_kind": VerificationKind.FILESYSTEM.value,
+                        "reference_verified": True,
+                        "symbol_verified": False,
+                        "relationship_requested": False,
+                        "relationship_verified": False,
                         "structurally_verified": False,
                         "confidence": verification_confidence(VerificationKind.FILESYSTEM),
+                        "reference_confidence": 0.50,
+                        "relationship_confidence": 0.0,
+                        "edge_confidence": 0.50,
                         "path": path,
                     },
                     diagnostic=f"Path '{path}' confirmed on disk in repository.",

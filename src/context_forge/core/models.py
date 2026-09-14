@@ -156,6 +156,68 @@ class EvidenceStatement:
         )
 
 
+
+@dataclass
+class ClaimProposition:
+    """Structured proposition for deterministic semantic conflict resolution."""
+    subject: str = ""
+    predicate: str = ""
+    object: str = ""
+    polarity: bool = True
+    claim_key: str = ""
+    qualifiers: dict[str, Any] = field(default_factory=dict)
+    scope: list[str] = field(default_factory=list)
+    confidence: float = 1.0
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {
+            "subject": self.subject,
+            "predicate": self.predicate,
+            "object": self.object,
+            "polarity": self.polarity,
+        }
+        if self.claim_key:
+            d["claim_key"] = self.claim_key
+        elif self.subject and self.predicate:
+            d["claim_key"] = f"{self.subject}:{self.predicate}:{self.object}"
+        if self.qualifiers:
+            d["qualifiers"] = self.qualifiers
+        if self.scope:
+            d["scope"] = self.scope
+        if self.confidence < 1.0:
+            d["confidence"] = self.confidence
+        return d
+
+    @classmethod
+    def from_dict(cls, data: Any) -> Optional["ClaimProposition"]:
+        if not data:
+            return None
+        if isinstance(data, cls):
+            return data
+        if not isinstance(data, dict):
+            return None
+        subj = str(data.get("subject", "")).strip()
+        pred = str(data.get("predicate", "")).strip()
+        obj = str(data.get("object", "")).strip()
+        if not (subj or pred or obj):
+            return None
+        pol_raw = data.get("polarity", True)
+        if isinstance(pol_raw, str):
+            pol = pol_raw.lower() not in ("false", "0", "negative", "no")
+        else:
+            pol = bool(pol_raw)
+        return cls(
+            subject=subj,
+            predicate=pred,
+            object=obj,
+            polarity=pol,
+            claim_key=str(data.get("claim_key", "")),
+            qualifiers=dict(data.get("qualifiers", {})),
+            scope=list(data.get("scope", [])),
+            confidence=float(data.get("confidence", 1.0)),
+        )
+
+
 @dataclass
 class KnowledgeRecord:
     """Canonical model for all durable knowledge records in .brain/."""
@@ -168,6 +230,7 @@ class KnowledgeRecord:
     body: str = ""
     evidence: EvidenceStatement = field(default_factory=lambda: EvidenceStatement(statement="Not supplied."))
     identity: IdentityEnvelope = field(default_factory=IdentityEnvelope)
+    claim: Optional[ClaimProposition] = None
     confidence: float = 1.0
     created_at: str = field(default_factory=now_iso)
     scope: list[str] = field(default_factory=list)
@@ -183,6 +246,7 @@ class KnowledgeRecord:
         res = asdict(self)
         res["evidence"] = self.evidence.to_dict()
         res["identity"] = self.identity.to_dict()
+        res["claim"] = self.claim.to_dict() if self.claim else None
         return res
 
     def to_markdown(self) -> str:
@@ -205,6 +269,17 @@ class KnowledgeRecord:
             fm_lines.append(f"superseded_by: {self.superseded_by}")
         if self.freshness and self.freshness != "fresh":
             fm_lines.append(f"freshness: {self.freshness}")
+        if self.claim:
+            c = self.claim
+            if c.subject:
+                fm_lines.append(f"claim_subject: {c.subject}")
+            if c.predicate:
+                fm_lines.append(f"claim_predicate: {c.predicate}")
+            if c.object:
+                fm_lines.append(f"claim_object: {c.object}")
+            fm_lines.append(f"claim_polarity: {'true' if c.polarity else 'false'}")
+            if c.claim_key:
+                fm_lines.append(f"claim_key: {c.claim_key}")
 
         # Provenance / Identity fields
         ident = self.identity
@@ -307,7 +382,8 @@ class KnowledgeRecord:
             "observed_at", "evidence_source_type", "evidence_authority_level", "evidence_observed_commit",
             "evidence_digest", "evidence_producer", "evidence_contains_redactions", "contains_redactions",
             "evidence_verification_state", "evidence_verified_at", "evidence_created_at", "evidence_observed_at",
-            "evidence_source_refs", "scope", "affected_symbols", "affected_tests"
+            "evidence_source_refs", "scope", "affected_symbols", "affected_tests",
+            "claim", "claim_subject", "claim_predicate", "claim_object", "claim_polarity", "claim_key"
         }
         for k, v in sorted(self.extra_frontmatter.items()):
             if k not in known_keys:
