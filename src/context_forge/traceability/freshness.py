@@ -280,10 +280,20 @@ def check_exact_revert(repo: Path, observed_sha: str, path: str) -> bool:
             text=True,
             check=False,
         )
-        if res_cur.returncode != 0:
-            return False
-        cur_hash = res_cur.stdout.strip()
-        return obs_hash == cur_hash
+        if res_cur.returncode == 0 and res_cur.stdout.strip() == obs_hash:
+            return True
+
+        # Fallback checking without filters (handles CRLF/LF normalization differences on Windows)
+        res_cur2 = subprocess.run(
+            ["git", "-C", str(repo), "hash-object", "--no-filters", str(repo / path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if res_cur2.returncode == 0 and res_cur2.stdout.strip() == obs_hash:
+            return True
+
+        return False
     except (subprocess.SubprocessError, OSError):
         return False
 
@@ -291,7 +301,7 @@ def check_exact_revert(repo: Path, observed_sha: str, path: str) -> bool:
 def evaluate_record_freshness(
     repo: Path,
     record_path: Path,
-    changed_files: Optional[set[str]] = None,
+    changed_files: Optional[set[str] | WorktreeStatusResult] = None,
     current_head: str = "HEAD",
 ) -> FreshnessEvaluation:
     """Evaluate record freshness with full Git provenance evidence and failure semantics."""
@@ -322,7 +332,17 @@ def evaluate_record_freshness(
         )
 
     # 2. Check uncommitted working tree dirty files
-    if changed_files is None:
+    if isinstance(changed_files, WorktreeStatusResult):
+        if changed_files.status == "GIT_ERROR":
+            return FreshnessEvaluation(
+                record_id=rec_id,
+                status="unverified",
+                comparison_status=GitComparisonStatus.GIT_ERROR,
+                linked_paths=linked_paths,
+                reason=f"Working tree dirty state could not be verified: {changed_files.diagnostic}",
+            )
+        dirty = set(changed_files.paths)
+    elif changed_files is None:
         wt_res = get_git_changed_paths_result(repo)
         if wt_res.status == "GIT_ERROR":
             return FreshnessEvaluation(
@@ -498,7 +518,7 @@ def evaluate_record_freshness(
 def check_record_freshness(
     repo: Path,
     record_path: Path,
-    changed_files: Optional[set[str]] = None,
+    changed_files: Optional[set[str] | WorktreeStatusResult] = None,
     current_head: str = "HEAD",
 ) -> str:
     """Assess whether a record's linked paths have changed across commits and working tree."""
@@ -510,7 +530,7 @@ def update_repository_freshness(repo: Path) -> dict[str, str]:
     """Scan all technical and traceability records, updating freshness in place."""
     p = brain_paths(repo)
     with repo_lock(p):
-        changed = set(get_git_changed_paths(repo))
+        wt_res = get_git_changed_paths_result(repo)
         status_map = {}
 
         for folder_key in ("technical", "traceability"):
@@ -518,7 +538,7 @@ def update_repository_freshness(repo: Path) -> dict[str, str]:
             if not folder.exists():
                 continue
             for page in folder.glob("*.md"):
-                freshness = check_record_freshness(repo, page, changed)
+                freshness = check_record_freshness(repo, page, wt_res)
                 status_map[page.name] = freshness
                 # Update freshness in frontmatter if changed
                 text = read_text(page)

@@ -189,6 +189,18 @@ class TestCBMContract(unittest.TestCase):
             self.assertFalse(res_no_rel.data["structurally_verified"])
             self.assertEqual(res_no_rel.data["confidence"], 0.90)
 
+            # Case C: adversarial - relationship matches edge type, but target_symbol does NOT match
+            res_wrong_target = cbm.verify_reference(repo_path=repo_dir, path="src/token.py", symbol="TokenService", relationship="implements", target_symbol="IWrongInterface")
+            self.assertEqual(res_wrong_target.status, ProviderStatus.OK)
+            self.assertEqual(res_wrong_target.data["verification_kind"], "symbol_graph")
+            self.assertFalse(res_wrong_target.data["structurally_verified"])
+            self.assertFalse(res_wrong_target.data["relationship_verified"])
+
+            # Case D: adversarial - unrelated symbol with matching relationship type must NOT verify
+            res_unrelated = cbm.verify_reference(repo_path=repo_dir, path="src/other.py", symbol="OtherService", relationship="implements")
+            self.assertFalse((res_unrelated.data or {}).get("structurally_verified", False))
+            self.assertFalse((res_unrelated.data or {}).get("relationship_verified", False))
+
     def test_cbm_root_plumbing_distinct_from_scope_paths(self) -> None:
         """Adversarial test: repository root != cwd, scope_paths contains relative and absolute files."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -393,6 +405,7 @@ class TestCBMContract(unittest.TestCase):
                 path="payment.py",
                 symbol="StripeGateway",
                 relationship="inherits",
+                target_symbol="PaymentGateway",
             )
             if res.status == ProviderStatus.UNINDEXED:
                 self.fail("Live CBM E2E cannot pass with UNINDEXED status")
@@ -401,10 +414,10 @@ class TestCBMContract(unittest.TestCase):
             if not res.is_ok():
                 self.fail(f"Live CBM verify_reference failed: {res.diagnostic}")
 
-            self.assertTrue(
-                res.data.get("symbol_verified") or res.data.get("structurally_verified"),
-                "Live CBM must produce verified symbol or structural evidence",
-            )
+            self.assertTrue(res.data.get("relationship_requested"), "relationship_requested must be True")
+            self.assertTrue(res.data.get("relationship_verified"), "relationship_verified must be True")
+            self.assertTrue(res.data.get("structurally_verified"), "structurally_verified must be True")
+            self.assertEqual(res.data.get("verification_kind"), VerificationKind.STRUCTURAL_GRAPH.value)
 
             from context_forge.compiler.pack import compile_context_pack
             pack = compile_context_pack(fixture_repo, task_query="Payment processing", paths=["payment.py"])

@@ -452,6 +452,86 @@ class AuthorityAndConflictTestCase(unittest.TestCase):
         ]
         self.assertEqual(len(drift_alerts_agree), 0, "No drift should be raised when structured claims agree")
 
+    def test_different_predicates_same_subject_do_not_drift(self):
+        """Claims with same subject but different predicates are complementary properties, not contradictions."""
+        intent = {
+            "id": "REQ-GATE",
+            "kind": "requirement",
+            "authority": "user_explicit",
+            "subject": "RiskGate",
+            "predicate": "owner",
+            "object": "planner",
+            "polarity": True,
+            "title": "RiskGate Owner",
+            "body": "Planner owns RiskGate.",
+        }
+        impl = {
+            "id": "TECH-GATE",
+            "kind": "technical",
+            "authority": "code_observed",
+            "subject": "RiskGate",
+            "predicate": "mode",
+            "object": "strict",
+            "polarity": True,
+            "title": "RiskGate Mode",
+            "body": "Strict mode configured.",
+        }
+        res = EpistemicAuthority.resolve_claims(intent, impl)
+        self.assertFalse(res.claims_conflict, "Different predicates on same subject must NOT conflict")
+        self.assertEqual(res.disposition, ResolutionDisposition.AGREES)
+
+    def test_matching_predicates_different_objects_produce_drift(self):
+        """Claims with matching subject and matching predicate but opposing objects must produce DRIFT."""
+        intent = {
+            "id": "REQ-GATE",
+            "kind": "requirement",
+            "authority": "user_explicit",
+            "subject": "RiskGate",
+            "predicate": "owner",
+            "object": "planner",
+            "polarity": True,
+            "title": "RiskGate Owner",
+            "body": "Planner owns RiskGate.",
+        }
+        impl = {
+            "id": "TECH-GATE",
+            "kind": "technical",
+            "authority": "code_observed",
+            "subject": "RiskGate",
+            "predicate": "owner",
+            "object": "agent",
+            "polarity": True,
+            "title": "RiskGate Owner",
+            "body": "Agent owns RiskGate.",
+        }
+        res = EpistemicAuthority.resolve_claims(intent, impl)
+        self.assertTrue(res.claims_conflict, "Matching predicate with divergent object must conflict")
+        self.assertEqual(res.disposition, ResolutionDisposition.DRIFT)
+
+    def test_opposing_polarity_same_subject_predicate_produces_drift(self):
+        """Claims with matching subject and predicate but opposite polarity must produce DRIFT."""
+        intent = {
+            "id": "REQ-GATE",
+            "kind": "requirement",
+            "authority": "user_explicit",
+            "subject": "RiskGate",
+            "predicate": "enforce",
+            "object": "enabled",
+            "polarity": True,
+        }
+        impl = {
+            "id": "TECH-GATE",
+            "kind": "technical",
+            "authority": "code_observed",
+            "subject": "RiskGate",
+            "predicate": "enforce",
+            "object": "enabled",
+            "polarity": False,
+        }
+        res = EpistemicAuthority.resolve_claims(intent, impl)
+        self.assertTrue(res.claims_conflict)
+        self.assertEqual(res.disposition, ResolutionDisposition.DRIFT)
+
 
 if __name__ == "__main__":
     unittest.main()

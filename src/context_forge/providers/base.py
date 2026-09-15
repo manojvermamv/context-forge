@@ -3,6 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any, Optional
 from context_forge.core.models import now_iso
 
@@ -213,6 +214,8 @@ class CodeIntelligenceProvider(ABC):
         path: str,
         symbol: Optional[str] = None,
         relationship: Optional[str] = None,
+        target_symbol: Optional[str] = None,
+        target_path: Optional[str] = None,
     ) -> ProviderResult:
         """Verify structural presence of a target file, symbol, or relationship."""
         pass

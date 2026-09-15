@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Optional
 from context_forge.core.budgets import Budgets
 from context_forge.core.models import now_iso
 from context_forge.providers.base import (
@@ -203,6 +203,8 @@ class NativeCodeProvider(CodeIntelligenceProvider):
         path: str,
         symbol: Optional[str] = None,
         relationship: Optional[str] = None,
+        target_symbol: Optional[str] = None,
+        target_path: Optional[str] = None,
     ) -> ProviderResult:
         """Verify presence of file or symbol in repository using native scanning.
         

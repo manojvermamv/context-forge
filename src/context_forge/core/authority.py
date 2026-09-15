@@ -193,6 +193,53 @@ class EpistemicAuthority:
         return ResolutionDisposition.AGREES
 
     @classmethod
+    def _extract_claim_components(cls, item: dict[str, Any]) -> tuple[str, str, str, bool, str]:
+        """Extract (subject, predicate, object, polarity, claim_key) normalized from claim item."""
+        c = item.get("claim")
+        c_dict = c if isinstance(c, dict) else (c.to_dict() if hasattr(c, "to_dict") else {})
+
+        subj = str(item.get("subject") or c_dict.get("subject") or item.get("claim_subject") or "").strip().lower()
+        pred = str(item.get("predicate") or c_dict.get("predicate") or item.get("claim_predicate") or "").strip().lower()
+        obj = str(item.get("object") or c_dict.get("object") or item.get("claim_object") or "").strip().lower()
+
+        pol_raw = item.get("polarity")
+        if pol_raw is None and "claim_polarity" in item:
+            pol_raw = item["claim_polarity"]
+        if pol_raw is None and "polarity" in c_dict:
+            pol_raw = c_dict["polarity"]
+        if pol_raw is None:
+            pol_raw = True
+        if isinstance(pol_raw, str):
+            pol = pol_raw.lower() not in ("false", "0", "negative", "no")
+        else:
+            pol = bool(pol_raw)
+
+        key = str(item.get("claim_key") or c_dict.get("claim_key") or item.get("claim_key") or "").strip().lower()
+        return subj, pred, obj, pol, key
+
+    @classmethod
+    def _is_same_structured_proposition(
+        cls,
+        subj_a: str, pred_a: str, key_a: str,
+        subj_b: str, pred_b: str, key_b: str,
+    ) -> bool:
+        """Return True if both items address the same structured proposition.
+        
+        Requires matching non-empty claim_key OR matching non-empty subject AND matching predicate.
+        Claims that share a subject but address different predicates (e.g. RiskGate.owner vs RiskGate.mode)
+        are complementary properties of the same subject, NOT conflicting propositions.
+        """
+        if key_a and key_b and key_a == key_b:
+            return True
+        if subj_a and subj_b and subj_a == subj_b:
+            if pred_a and pred_b:
+                return pred_a == pred_b
+            if not pred_a and not pred_b:
+                return True
+            return False
+        return False
+
+    @classmethod
     def resolve_claims(
         cls,
         claim_a: dict[str, Any],
@@ -225,16 +272,9 @@ class EpistemicAuthority:
             exp_text = (exp_item.get("finding", "") + " " + exp_item.get("lesson", "") + " " + exp_item.get("title", "")).lower()
 
             # Check normalized structured propositions first
-            subj_i = intent_item.get("subject") or intent_item.get("claim_key")
-            subj_e = exp_item.get("subject") or exp_item.get("claim_key")
-            if subj_i and subj_e and str(subj_i).lower() == str(subj_e).lower():
-                pol_i = intent_item.get("polarity", True)
-                pol_e = exp_item.get("polarity", True)
-                obj_i = str(intent_item.get("object", "")).lower()
-                obj_e = str(exp_item.get("object", "")).lower()
-                pred_i = str(intent_item.get("predicate", "")).lower()
-                pred_e = str(exp_item.get("predicate", "")).lower()
-
+            subj_i, pred_i, obj_i, pol_i, key_i = cls._extract_claim_components(intent_item)
+            subj_e, pred_e, obj_e, pol_e, key_e = cls._extract_claim_components(exp_item)
+            if cls._is_same_structured_proposition(subj_i, pred_i, key_i, subj_e, pred_e, key_e):
                 if pol_i != pol_e or (obj_i and obj_e and obj_i != obj_e):
                     return AuthorityResolution(
                         disposition=ResolutionDisposition.ADVICE_REJECTED,
@@ -317,21 +357,9 @@ class EpistemicAuthority:
             disp = ResolutionDisposition.VIOLATION if is_violation else ResolutionDisposition.DRIFT
 
             # Check normalized structured propositions
-            subj_i = intent_item.get("subject") or intent_item.get("claim_key") or (intent_item.get("claim", {}).get("subject") if isinstance(intent_item.get("claim"), dict) else getattr(intent_item.get("claim"), "subject", None))
-            subj_c = code_item.get("subject") or code_item.get("claim_key") or (code_item.get("claim", {}).get("subject") if isinstance(code_item.get("claim"), dict) else getattr(code_item.get("claim"), "subject", None))
-            if subj_i and subj_c and str(subj_i).lower() == str(subj_c).lower():
-                pol_i = intent_item.get("polarity", True)
-                if isinstance(intent_item.get("claim"), dict) and "polarity" in intent_item["claim"]:
-                    pol_i = intent_item["claim"]["polarity"]
-                pol_c = code_item.get("polarity", True)
-                if isinstance(code_item.get("claim"), dict) and "polarity" in code_item["claim"]:
-                    pol_c = code_item["claim"]["polarity"]
-
-                obj_i = str(intent_item.get("object") or (intent_item.get("claim", {}).get("object") if isinstance(intent_item.get("claim"), dict) else "")).lower()
-                obj_c = str(code_item.get("object") or (code_item.get("claim", {}).get("object") if isinstance(code_item.get("claim"), dict) else "")).lower()
-                pred_i = str(intent_item.get("predicate") or (intent_item.get("claim", {}).get("predicate") if isinstance(intent_item.get("claim"), dict) else "")).lower()
-                pred_c = str(code_item.get("predicate") or (code_item.get("claim", {}).get("predicate") if isinstance(code_item.get("claim"), dict) else "")).lower()
-
+            subj_i, pred_i, obj_i, pol_i, key_i = cls._extract_claim_components(intent_item)
+            subj_c, pred_c, obj_c, pol_c, key_c = cls._extract_claim_components(code_item)
+            if cls._is_same_structured_proposition(subj_i, pred_i, key_i, subj_c, pred_c, key_c):
                 if pol_i != pol_c or (obj_i and obj_c and obj_i != obj_c):
                     return AuthorityResolution(
                         disposition=disp,
@@ -445,16 +473,12 @@ class EpistemicAuthority:
         # 3. IMPLEMENTATION vs IMPLEMENTATION
         if domain_a == AuthorityDomain.IMPLEMENTATION and domain_b == AuthorityDomain.IMPLEMENTATION:
             # Check structured proposition
-            subj_a = claim_a.get("subject") or claim_a.get("claim_key")
-            subj_b = claim_b.get("subject") or claim_b.get("claim_key")
+            subj_a, pred_a, obj_a, pol_a, key_a = cls._extract_claim_components(claim_a)
+            subj_b, pred_b, obj_b, pol_b, key_b = cls._extract_claim_components(claim_b)
             live_a = claim_a.get("is_live", False) or (claim_a.get("authority") == "code_observed" and not claim_a.get("scope"))
             live_b = claim_b.get("is_live", False) or (claim_b.get("authority") == "code_observed" and not claim_b.get("scope"))
 
-            if subj_a and subj_b and str(subj_a).lower() == str(subj_b).lower():
-                pol_a = claim_a.get("polarity", True)
-                pol_b = claim_b.get("polarity", True)
-                obj_a = str(claim_a.get("object", "")).lower()
-                obj_b = str(claim_b.get("object", "")).lower()
+            if cls._is_same_structured_proposition(subj_a, pred_a, key_a, subj_b, pred_b, key_b):
                 if pol_a != pol_b or (obj_a and obj_b and obj_a != obj_b):
                     winner = "current_code_evidence" if (live_a or live_b) else None
                     return AuthorityResolution(

@@ -65,7 +65,7 @@ class TraceabilityGraphTestCase(unittest.TestCase):
         edges = entry["edges"]
         self.assertEqual(len(edges), 3)
 
-        impl_edges = [e for e in edges if e["edge_type"] == TraceEdgeType.IMPLEMENTS.value]
+        impl_edges = [e for e in edges if e["edge_type"] in (TraceEdgeType.IMPLEMENTS.value, TraceEdgeType.IMPLEMENTS_REQUIREMENT.value)]
         verify_edges = [e for e in edges if e["edge_type"] == TraceEdgeType.VERIFIES_WITH.value]
 
         self.assertEqual(len(impl_edges), 2)
@@ -352,6 +352,38 @@ class TraceabilityGraphTestCase(unittest.TestCase):
         self.assertEqual(edge["verification_state"], "unverified")
         self.assertEqual(edge["confidence"], 0.5)
         self.assertNotIn("cbm", edge.get("provider", ""))
+
+    def test_aggregate_state_partially_verified(self):
+        """When edges contain partially_verified (without verified), aggregate state must be partially_verified."""
+        from context_forge.traceability.resolver import _recompute_graph_aggregate_state
+        graph = [
+            {
+                "canonical_id": "REQ-PARTIAL",
+                "verification_state": "unverified",
+                "edges": [
+                    {
+                        "edge_type": TraceEdgeType.IMPLEMENTS_REQUIREMENT.value,
+                        "verification_state": "partially_verified",
+                    },
+                    {
+                        "edge_type": TraceEdgeType.VERIFIES_WITH.value,
+                        "verification_state": "unverified",
+                    },
+                ],
+            }
+        ]
+        _recompute_graph_aggregate_state(graph)
+        self.assertEqual(graph[0]["verification_state"], "partially_verified")
+
+    def test_trace_edge_domain_separation(self):
+        """Governance-to-code edges map to PROJECT_GOVERNANCE; code structural edges map to CODE_STRUCTURE."""
+        from context_forge.traceability.resolver import edge_type_to_domain
+        self.assertEqual(edge_type_to_domain(TraceEdgeType.IMPLEMENTS_REQUIREMENT).value, "PROJECT_GOVERNANCE")
+        self.assertEqual(edge_type_to_domain(TraceEdgeType.TRACES_TO_CODE).value, "PROJECT_GOVERNANCE")
+        self.assertEqual(edge_type_to_domain(TraceEdgeType.SATISFIES).value, "PROJECT_GOVERNANCE")
+        self.assertEqual(edge_type_to_domain(TraceEdgeType.IMPLEMENTS_INTERFACE).value, "CODE_STRUCTURE")
+        self.assertEqual(edge_type_to_domain(TraceEdgeType.INHERITS).value, "CODE_STRUCTURE")
+        self.assertEqual(edge_type_to_domain(TraceEdgeType.CALLS).value, "CODE_STRUCTURE")
 
 
 if __name__ == "__main__":

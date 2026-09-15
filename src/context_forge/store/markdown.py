@@ -260,12 +260,38 @@ def parse_markdown_record(path: Path, root: Path) -> KnowledgeRecord:
             pol_b = pol_val.lower() not in ("false", "0", "negative", "no")
         else:
             pol_b = bool(pol_val)
+        conf_val = 1.0
+        if "claim_confidence" in fm:
+            try:
+                conf_val = float(fm["claim_confidence"])
+            except (ValueError, TypeError):
+                conf_val = 1.0
+
+        scope_val = []
+        if "claim_scope" in fm:
+            raw_sc = fm["claim_scope"]
+            scope_val = [str(x) for x in raw_sc] if isinstance(raw_sc, list) else [str(raw_sc)]
+
+        qual_val = {}
+        if "claim_qualifiers" in fm:
+            raw_q = fm["claim_qualifiers"]
+            if isinstance(raw_q, dict):
+                qual_val = raw_q
+            elif isinstance(raw_q, str) and raw_q.startswith("{"):
+                try:
+                    qual_val = json.loads(raw_q)
+                except Exception:
+                    qual_val = {}
+
         claim_obj = ClaimProposition(
             subject=str(fm.get("claim_subject", "")).strip(),
             predicate=str(fm.get("claim_predicate", "")).strip(),
             object=str(fm.get("claim_object", "")).strip(),
             polarity=pol_b,
             claim_key=str(fm.get("claim_key", "")).strip(),
+            qualifiers=qual_val,
+            scope=scope_val,
+            confidence=conf_val,
         )
 
     known_keys = {
@@ -281,7 +307,8 @@ def parse_markdown_record(path: Path, root: Path) -> KnowledgeRecord:
         "evidence_verification_state", "evidence_verified_at", "evidence_created_at",
         "evidence_observed_at", "evidence_timestamp", "evidence_source_refs", "source_type",
         "source_ref", "observed_commit", "digest", "timestamp", "affected_symbols", "affected_tests",
-        "claim", "claim_subject", "claim_predicate", "claim_object", "claim_polarity", "claim_key"
+        "claim", "claim_subject", "claim_predicate", "claim_object", "claim_polarity", "claim_key",
+        "claim_confidence", "claim_scope", "claim_qualifiers"
     }
     extra = {k: v for k, v in fm.items() if k not in known_keys}
 

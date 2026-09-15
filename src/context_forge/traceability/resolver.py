@@ -18,23 +18,45 @@ from context_forge.providers.base import (
 
 class TraceEdgeType(str, Enum):
     """Explicit typed traceability relationship edges."""
-    SATISFIES = "SATISFIES"             # ADR / POL satisfies REQ
-    IMPLEMENTS = "IMPLEMENTS"           # Source file/component implements ADR / REQ / POL
-    SYMBOL_DEFINES = "SYMBOL_DEFINES"   # Symbol defined in component / file
-    VERIFIES_WITH = "VERIFIES_WITH"     # Test suite/file verifies Component / Requirement / Decision
-    OBSERVES = "OBSERVES"               # Technical record observes file / symbol
-    DERIVED_FROM = "DERIVED_FROM"       # Record derived from parent requirement / decision
+    SATISFIES = "SATISFIES"                             # ADR / POL satisfies REQ (PROJECT_GOVERNANCE)
+    DERIVED_FROM = "DERIVED_FROM"                       # Record derived from parent requirement / decision (PROJECT_GOVERNANCE)
+    IMPLEMENTS_REQUIREMENT = "IMPLEMENTS_REQUIREMENT"   # Source file/component implements ADR / REQ / POL (PROJECT_GOVERNANCE)
+    TRACES_TO_CODE = "TRACES_TO_CODE"                   # Governance record traces to code entity (PROJECT_GOVERNANCE)
+    IMPLEMENTS = "IMPLEMENTS"                           # Backward-compatible alias for IMPLEMENTS_REQUIREMENT
+
+    # Structural code relationships (CODE_STRUCTURE)
+    IMPLEMENTS_INTERFACE = "IMPLEMENTS_INTERFACE"       # Class implements interface (CODE_STRUCTURE)
+    INHERITS = "INHERITS"                               # Class inherits from base class (CODE_STRUCTURE)
+    CALLS = "CALLS"                                     # Function/method calls another (CODE_STRUCTURE)
+    SYMBOL_DEFINES = "SYMBOL_DEFINES"                   # Symbol defined in component / file (CODE_STRUCTURE)
+
+    # Test evidence & filesystem
+    VERIFIES_WITH = "VERIFIES_WITH"                     # Test suite/file verifies Component / Requirement / Decision (TEST_EVIDENCE)
+    OBSERVES = "OBSERVES"                               # Technical record observes file / symbol (FILESYSTEM)
 
 
 def edge_type_to_domain(edge_type: TraceEdgeType | str) -> TraceEdgeVerificationDomain:
     """Map explicit edge types to authoritative verification domains."""
     val = edge_type.value if hasattr(edge_type, "value") else str(edge_type)
-    if val in (TraceEdgeType.SATISFIES.value, TraceEdgeType.DERIVED_FROM.value):
+    if val in (
+        TraceEdgeType.SATISFIES.value,
+        TraceEdgeType.DERIVED_FROM.value,
+        TraceEdgeType.IMPLEMENTS_REQUIREMENT.value,
+        TraceEdgeType.TRACES_TO_CODE.value,
+        TraceEdgeType.IMPLEMENTS.value,
+    ):
         return TraceEdgeVerificationDomain.PROJECT_GOVERNANCE
     if val == TraceEdgeType.VERIFIES_WITH.value:
         return TraceEdgeVerificationDomain.TEST_EVIDENCE
     if val == TraceEdgeType.OBSERVES.value:
         return TraceEdgeVerificationDomain.FILESYSTEM
+    if val in (
+        TraceEdgeType.IMPLEMENTS_INTERFACE.value,
+        TraceEdgeType.INHERITS.value,
+        TraceEdgeType.CALLS.value,
+        TraceEdgeType.SYMBOL_DEFINES.value,
+    ):
+        return TraceEdgeVerificationDomain.CODE_STRUCTURE
     return TraceEdgeVerificationDomain.CODE_STRUCTURE
 
 
@@ -133,7 +155,7 @@ def _recompute_graph_aggregate_state(graph: list[dict[str, Any]]) -> None:
             entry["verification_state"] = "stale"
         elif all(e.get("verification_state") == "verified" for e in edges):
             entry["verification_state"] = "verified"
-        elif any(e.get("verification_state") == "verified" for e in edges):
+        elif any(e.get("verification_state") in ("verified", "partially_verified") for e in edges):
             entry["verification_state"] = "partially_verified"
         else:
             entry["verification_state"] = "unverified"
@@ -175,7 +197,7 @@ def resolve_traceability_graph(repo: Path) -> list[dict[str, Any]]:
                 target_kind = "test"
                 tests.append(normalized)
             else:
-                edge_type = TraceEdgeType.IMPLEMENTS
+                edge_type = TraceEdgeType.IMPLEMENTS_REQUIREMENT
                 target_kind = "file"
                 code_files.append(normalized)
 
@@ -197,7 +219,7 @@ def resolve_traceability_graph(repo: Path) -> list[dict[str, Any]]:
                 confidence=confidence,
                 last_verified_at=now_iso() if file_exists else "",
                 symbol=None,
-                relationship=edge_type.value if hasattr(edge_type, "value") else str(edge_type),
+                relationship=None,
                 verification_kind=v_kind,
                 structurally_verified=False,
             )
@@ -246,14 +268,24 @@ def reconcile_traceability_with_provider(
     for entry in graph:
         for edge in entry.get("edges", []):
             edge_domain = edge.get("verification_domain") or edge_type_to_domain(edge.get("edge_type", "")).value
-            if edge_domain == TraceEdgeVerificationDomain.PROJECT_GOVERNANCE.value:
-                # External code intelligence providers cannot verify project-governance edges (e.g. REQ SATISFIES ADR).
-                # Preserve existing canonical/evidence verification state.
+            target_kind = edge.get("target_kind", "file")
+            
+            # Pure record-to-record governance edges (e.g. REQ SATISFIES ADR, REQ DERIVED_FROM POL)
+            # are owned solely by Context Forge; external code providers cannot verify them.
+            if edge_domain == TraceEdgeVerificationDomain.PROJECT_GOVERNANCE.value and target_kind in ("record", "decision", "requirement", "policy"):
                 continue
 
             target_ref = edge.get("target_ref", "")
             symbol = edge.get("symbol")
-            relationship = edge.get("relationship") or edge.get("edge_type")
+            target_symbol = edge.get("target_symbol")
+            target_path = edge.get("target_path")
+
+            # For governance-to-code edges (IMPLEMENTS_REQUIREMENT), code intelligence verifies
+            # the existence of the file/symbol, NOT an AST relationship (unless explicitly specified).
+            if edge_domain == TraceEdgeVerificationDomain.PROJECT_GOVERNANCE.value:
+                relationship = edge.get("relationship")
+            else:
+                relationship = edge.get("relationship") or (edge.get("edge_type") if edge.get("edge_type") not in (TraceEdgeType.IMPLEMENTS.value, TraceEdgeType.IMPLEMENTS_REQUIREMENT.value) else None)
 
             if not hasattr(prov, "verify_reference"):
                 raise TypeError(
@@ -262,12 +294,22 @@ def reconcile_traceability_with_provider(
                 )
 
             try:
-                res = prov.verify_reference(
-                    repo_path=repo,
-                    path=target_ref,
-                    symbol=symbol,
-                    relationship=relationship,
-                )
+                try:
+                    res = prov.verify_reference(
+                        repo_path=repo,
+                        path=target_ref,
+                        symbol=symbol,
+                        relationship=relationship,
+                        target_symbol=target_symbol,
+                        target_path=target_path,
+                    )
+                except TypeError:
+                    res = prov.verify_reference(
+                        repo_path=repo,
+                        path=target_ref,
+                        symbol=symbol,
+                        relationship=relationship,
+                    )
             except (TimeoutError, OSError) as exc:
                 edge["verification_state"] = "unverified"
                 edge["evidence"] = f"Provider '{provider_name}' runtime communication failure: {exc}"

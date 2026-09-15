@@ -10,6 +10,7 @@ from context_forge.core.models import (
     IdentityEnvelope,
     EvidenceStatement,
     KnowledgeRecord,
+    ClaimProposition,
     ContextPack,
     now_iso,
     today,
@@ -338,6 +339,52 @@ Internal security checklist.
             self.assertEqual(rec.identity.authority_level, 90)
             # Evidence authority must be safe default (0), not silently copy identity authority 90!
             self.assertEqual(rec.evidence.authority_level, 0)
+
+    def test_claim_proposition_full_roundtrip(self) -> None:
+        """Verify that ClaimProposition qualifiers, scope, and confidence survive Markdown roundtrip."""
+        claim = ClaimProposition(
+            subject="RiskGate",
+            predicate="owner",
+            object="planner",
+            polarity=True,
+            claim_key="RISK_001",
+            qualifiers={"mode": "strict", "retry_count": 3},
+            scope=["src/risk.py", "src/auth.py"],
+            confidence=0.85,
+        )
+        record = KnowledgeRecord(
+            id="REQ-CLAIM-01",
+            kind="requirement",
+            title="RiskGate Configuration Proposition",
+            status="accepted",
+            authority="user_explicit",
+            claim=claim,
+            scope=["src/risk.py", "src/auth.py"],
+        )
+
+        md_text = serialize_markdown_record(record)
+        self.assertIn("claim_subject: RiskGate", md_text)
+        self.assertIn("claim_predicate: owner", md_text)
+        self.assertIn("claim_object: planner", md_text)
+        self.assertIn("claim_confidence: 0.85", md_text)
+        self.assertIn("claim_qualifiers:", md_text)
+
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Path(tmpdir) / "REQ-CLAIM-01.md"
+            p.write_text(md_text, encoding="utf-8")
+            rec = parse_markdown_record(p, Path(tmpdir))
+
+            self.assertIsNotNone(rec.claim)
+            assert rec.claim is not None
+            self.assertEqual(rec.claim.subject, "RiskGate")
+            self.assertEqual(rec.claim.predicate, "owner")
+            self.assertEqual(rec.claim.object, "planner")
+            self.assertTrue(rec.claim.polarity)
+            self.assertEqual(rec.claim.claim_key, "RISK_001")
+            self.assertEqual(rec.claim.confidence, 0.85)
+            self.assertEqual(rec.claim.scope, ["src/risk.py", "src/auth.py"])
+            self.assertEqual(rec.claim.qualifiers, {"mode": "strict", "retry_count": 3})
 
 
 if __name__ == "__main__":

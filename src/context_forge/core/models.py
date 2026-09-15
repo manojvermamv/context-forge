@@ -280,6 +280,14 @@ class KnowledgeRecord:
             fm_lines.append(f"claim_polarity: {'true' if c.polarity else 'false'}")
             if c.claim_key:
                 fm_lines.append(f"claim_key: {c.claim_key}")
+            if c.confidence < 1.0:
+                fm_lines.append(f"claim_confidence: {c.confidence}")
+            if c.scope:
+                fm_lines.append("claim_scope:")
+                for sc in c.scope:
+                    fm_lines.append(f"  - {sc}")
+            if c.qualifiers:
+                fm_lines.append(f"claim_qualifiers: {json.dumps(c.qualifiers)}")
 
         # Provenance / Identity fields
         ident = self.identity
@@ -383,7 +391,8 @@ class KnowledgeRecord:
             "evidence_digest", "evidence_producer", "evidence_contains_redactions", "contains_redactions",
             "evidence_verification_state", "evidence_verified_at", "evidence_created_at", "evidence_observed_at",
             "evidence_source_refs", "scope", "affected_symbols", "affected_tests",
-            "claim", "claim_subject", "claim_predicate", "claim_object", "claim_polarity", "claim_key"
+            "claim", "claim_subject", "claim_predicate", "claim_object", "claim_polarity", "claim_key",
+            "claim_confidence", "claim_scope", "claim_qualifiers"
         }
         for k, v in sorted(self.extra_frontmatter.items()):
             if k not in known_keys:

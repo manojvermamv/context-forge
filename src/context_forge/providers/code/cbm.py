@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any, Optional, Union
 from context_forge.core.evidence import screen_secrets
 from context_forge.providers.base import (
     CodeIntelligenceProvider,
@@ -113,8 +114,11 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
 
         t0 = time.monotonic()
         try:
+            v_cmd = [str(exe), "--version"]
+            if sys.platform == "win32" and str(exe).lower().endswith((".bat", ".cmd")):
+                v_cmd = ["cmd.exe", "/c"] + v_cmd
             res = subprocess.run(
-                [str(exe), "--version"],
+                v_cmd,
                 capture_output=True,
                 text=True,
                 timeout=10.0,
@@ -160,7 +164,7 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
     def is_available(self) -> bool:
         return self.check_health().is_ok()
 
-    def run_tool(self, tool_name: str, args: dict[str, Any], timeout: float = 6.0) -> ProviderResult:
+    def run_tool(self, tool_name: str, args: dict[str, Any], timeout: float = 15.0) -> ProviderResult:
         """Execute a CBM tool via modern machine CLI flags (with fallback to inline JSON for legacy CBM) and secret screening."""
         exe = self._resolve_executable()
         if not exe:
@@ -182,6 +186,9 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
                 elif isinstance(v, (list, dict)):
                     cmd.extend([flag, json.dumps(v)])
 
+            if sys.platform == "win32" and str(exe).lower().endswith((".bat", ".cmd")):
+                cmd = ["cmd.exe", "/c"] + cmd
+
             res = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -194,8 +201,11 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
             # Compatibility fallback for older CBM binaries that only accept positional inline JSON
             if res.returncode != 0 and any(err_kw in res.stderr.lower() for err_kw in ("unrecognized argument", "unknown option", "unexpected argument")):
                 args_json = json.dumps(args)
+                fb_cmd = [str(exe), "cli", tool_name, args_json]
+                if sys.platform == "win32" and str(exe).lower().endswith((".bat", ".cmd")):
+                    fb_cmd = ["cmd.exe", "/c"] + fb_cmd
                 fb_res = subprocess.run(
-                    [str(exe), "cli", tool_name, args_json],
+                    fb_cmd,
                     capture_output=True,
                     text=True,
                     timeout=timeout,
@@ -332,10 +342,20 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
                         self._project_cache[norm_target] = (proj_name, now)
                         return proj_name, None
                     else:
-                        break
+                        return None, ProviderResult(
+                            status=status_res.status,
+                            provider=self.name(),
+                            diagnostic_code=status_res.diagnostic_code or "INDEX_STATUS_UNEXPECTED",
+                            diagnostic=status_res.diagnostic or f"CBM index_status returned unexpected response: {status_res.data}",
+                        )
 
-                self._project_cache[norm_target] = (proj_name, now)
-                return proj_name, None
+                # Polling timed out without reaching ready: NEVER cache, NEVER fail open
+                return None, ProviderResult(
+                    status=ProviderStatus.TIMEOUT,
+                    provider=self.name(),
+                    diagnostic_code="INDEXING_TIMEOUT",
+                    diagnostic=f"CBM indexing for project '{proj_name}' did not reach READY within {poll_timeout}s.",
+                )
 
         return None, ProviderResult(
             status=ProviderStatus.UNINDEXED,
@@ -445,6 +465,8 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
         path: str,
         symbol: Optional[str] = None,
         relationship: Optional[str] = None,
+        target_symbol: Optional[str] = None,
+        target_path: Optional[str] = None,
     ) -> ProviderResult:
         """Verify structural presence of a target file, symbol, or relationship using CBM CLI."""
         exe = self._resolve_executable()
@@ -481,6 +503,22 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
 
             found_rel = False
             found_symbol = False
+            matched_edge = None
+
+            # Endpoint candidate sets
+            src_tokens = {s.lower() for s in (symbol, path, Path(path).name, Path(path).stem) if s}
+            tgt_tokens = set()
+            if target_symbol or target_path:
+                tgt_tokens = {t.lower() for t in (target_symbol, target_path, Path(target_path).name if target_path else None, Path(target_path).stem if target_path else None) if t}
+
+            def _endpoint_matches(val: Any, tokens: set[str]) -> bool:
+                if not val or not tokens:
+                    return False
+                if isinstance(val, dict):
+                    extracted = [val.get("name"), val.get("symbol"), val.get("id"), val.get("path"), val.get("file")]
+                    return any(str(e).lower() in tokens or any(t in str(e).lower() for t in tokens) for e in extracted if e)
+                v_str = str(val).lower().replace("\\", "/")
+                return any(t == v_str or v_str.endswith("/" + t) or t in v_str for t in tokens)
 
             if isinstance(raw_data, dict):
                 edges = raw_data.get("edges") or raw_data.get("relationships") or []
@@ -488,18 +526,59 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
                     if isinstance(edge, dict):
                         e_type = str(edge.get("type") or edge.get("relationship") or edge.get("kind") or "").lower().replace("-", "_")
                         if e_type and (rel_norm in e_type or e_type in rel_norm):
-                            found_rel = True
-                            break
+                            e_src = edge.get("source") or edge.get("from") or edge.get("source_id") or edge.get("source_name") or edge.get("caller") or edge.get("origin")
+                            e_tgt = edge.get("target") or edge.get("to") or edge.get("target_id") or edge.get("target_name") or edge.get("callee") or edge.get("destination")
+                            
+                            if tgt_tokens:
+                                # Both endpoints must match: (src->tgt) or (tgt->src)
+                                if (_endpoint_matches(e_src, src_tokens) and _endpoint_matches(e_tgt, tgt_tokens)) or \
+                                   (_endpoint_matches(e_tgt, src_tokens) and _endpoint_matches(e_src, tgt_tokens)):
+                                    found_rel = True
+                                    matched_edge = edge
+                                    break
+                            else:
+                                # At least one endpoint must connect to the query source (symbol or path)
+                                if _endpoint_matches(e_src, src_tokens) or _endpoint_matches(e_tgt, src_tokens):
+                                    found_rel = True
+                                    matched_edge = edge
+                                    break
 
             for node in nodes:
                 if isinstance(node, dict):
                     name = node.get("name") or node.get("symbol") or ""
                     if symbol and name == symbol:
                         found_symbol = True
-                    n_rel = str(node.get("relationship") or node.get("relations") or "").lower().replace("-", "_")
-                    if n_rel and (rel_norm in n_rel or n_rel in rel_norm):
+                    # Only verify relationship through node if this node matches the source
+                    node_matches_src = _endpoint_matches(name, src_tokens) or _endpoint_matches(node.get("path"), src_tokens)
+                    if node_matches_src:
+                        n_rel = str(node.get("relationship") or node.get("relations") or "").lower().replace("-", "_")
+                        if n_rel and (rel_norm in n_rel or n_rel in rel_norm):
+                            if tgt_tokens:
+                                n_target = node.get("target") or node.get("target_symbol") or node.get("target_name")
+                                if _endpoint_matches(n_target, tgt_tokens):
+                                    found_rel = True
+                                    break
+                            else:
+                                found_rel = True
+                                break
+
+            # If target endpoint was specified and not found in search_graph, try trace_path tool
+            if not found_rel and (target_symbol or target_path):
+                tp_res = self.run_tool(
+                    "trace_path",
+                    {
+                        "project": project_name,
+                        "from": symbol or path,
+                        "to": target_symbol or target_path,
+                        "relationship": relationship,
+                    },
+                    timeout=10.0,
+                )
+                if tp_res.is_ok() and tp_res.data:
+                    tp_data = tp_res.data
+                    paths_found = tp_data.get("paths") or tp_data.get("path") if isinstance(tp_data, dict) else tp_data
+                    if paths_found:
                         found_rel = True
-                        break
 
             if found_rel:
                 return ProviderResult(
@@ -520,7 +599,10 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
                         "path": path,
                         "symbol": symbol,
                         "relationship": relationship,
+                        "target_symbol": target_symbol,
+                        "target_path": target_path,
                         "nodes": nodes,
+                        "matched_edge": matched_edge,
                     },
                     diagnostic=f"Structural relationship '{relationship}' verified in CBM project '{project_name}'.",
                 )

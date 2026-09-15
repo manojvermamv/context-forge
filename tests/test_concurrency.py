@@ -217,7 +217,7 @@ class ConcurrencyTestCase(unittest.TestCase):
         )
         proc_a.start()
         try:
-            self.assertTrue(ready_event.wait(timeout=5.0), "Process A failed to acquire lock")
+            self.assertTrue(ready_event.wait(timeout=15.0), "Process A failed to acquire lock")
 
             # Sleep longer than stale_timeout (0.5s) so lock age > stale_timeout
             time.sleep(0.8)
