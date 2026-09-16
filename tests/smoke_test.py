@@ -524,7 +524,7 @@ class ContextForgeSmokeTests(unittest.TestCase):
         self.assertTrue((engine / "scripts" / "brain.py").is_file())
         self.assertTrue((engine / "templates" / "index.md").is_file())
         self.assertTrue((engine / "SKILL.md").is_file())
-        self.assertTrue((engine / "AGENTS.md.snippet.md").is_file())
+        self.assertTrue((engine / "AGENTS.snippet.md").is_file())
         self.assertEqual("do not remove", preserved.read_text(encoding="utf-8"))
 
         expected_events = {"SessionStart", "UserPromptSubmit", "PreToolUse", "PreCompact", "Stop", "SubagentStop", "SessionEnd"}

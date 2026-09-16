@@ -91,7 +91,7 @@ def install_engine(engine_dir: Path) -> None:
     for subdir in ("scripts", "templates", "src", "schemas"):
         if (HERE / subdir).exists():
             shutil.copytree(HERE / subdir, engine_dir / subdir, dirs_exist_ok=True)
-    for name in ("SKILL.md", "AGENTS.md.snippet.md"):
+    for name in ("SKILL.md", "AGENTS.snippet.md"):
         _atomic_write(
             engine_dir / name,
             _render_engine_references((HERE / name).read_text(encoding="utf-8"), engine_dir),
@@ -203,13 +203,13 @@ def append_marked_block(target: Path, body: str, start: str, end: str, label: st
 
 
 def append_agents_block(agents_md: Path, engine_dir: Path) -> None:
-    body = _render_engine_references((HERE / "AGENTS.md.snippet.md").read_text(encoding="utf-8"), engine_dir)
+    body = _render_engine_references((HERE / "AGENTS.snippet.md").read_text(encoding="utf-8"), engine_dir)
     append_marked_block(agents_md, body, AGENTS_MARKER_START, AGENTS_MARKER_END, "AGENTS.md")
 
 
 def append_portable_adapters(repo: Path, engine_dir: Path) -> None:
     """Keep one portable protocol, with small host-specific entry points."""
-    body = _render_engine_references((HERE / "AGENTS.md.snippet.md").read_text(encoding="utf-8"), engine_dir)
+    body = _render_engine_references((HERE / "AGENTS.snippet.md").read_text(encoding="utf-8"), engine_dir)
     append_marked_block(repo / "AGENTS.md", body, AGENTS_MARKER_START, AGENTS_MARKER_END, "AGENTS.md")
     append_marked_block(repo / ".github" / "copilot-instructions.md", body,
                         COPILOT_MARKER_START, COPILOT_MARKER_END, "Copilot instructions")
