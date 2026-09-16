@@ -295,6 +295,85 @@ class ContextForgeV2ModuleTests(unittest.TestCase):
             self.assertEqual(impact_res.data[0]["symbol"], "RiskGate")
 
 
+    def test_map_budget_enforcement(self) -> None:
+        """Regression test proving build_code_map stays within Budgets.MAP_CHARS budget."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            # Create many source files with many symbols to stress map budget
+            src_dir = repo_dir / "src"
+            src_dir.mkdir(parents=True, exist_ok=True)
+            for i in range(50):
+                f_path = src_dir / f"module_{i:02d}.py"
+                f_content = "\n".join([f"class Class{i}_{j}: pass\ndef func{i}_{j}(): pass" for j in range(15)])
+                f_path.write_text(f_content, encoding="utf-8")
+
+            from context_forge.providers.code.native import build_code_map
+            from context_forge.core.budgets import Budgets
+
+            map_out = build_code_map(repo_dir)
+            self.assertLessEqual(len(map_out), Budgets.MAP_CHARS)
+            self.assertIn("map budget", map_out)
+
+    def test_policies_in_routing_index(self) -> None:
+        """Regression test verifying policies are auto-routed in index.md and not reported as orphans."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            from context_forge.cli.commands import cmd_init, cmd_map, cmd_index
+            from context_forge.cli.doctor import cmd_lint
+            from context_forge.knowledge.update import create_knowledge_record
+
+            cmd_init(repo_dir)
+            create_knowledge_record(
+                repo=repo_dir,
+                kind="policy",
+                title="Strict Security Policy",
+                body="All API keys must be screen-checked.",
+                authority="policy_mandate",
+                evidence="Mandatory security policy",
+                scope=[],
+                accept=True,
+            )
+
+            cmd_index(repo_dir)
+            index_text = (repo_dir / ".brain" / "index.md").read_text(encoding="utf-8")
+            self.assertIn("### Policies (`policies/`)", index_text)
+            self.assertIn("POL-001-strict-security-policy.md", index_text)
+
+            lint_issues = cmd_lint(repo_dir)
+            orphan_issues = [x for x in lint_issues if "orphan page" in x and "POL-001" in x]
+            self.assertEqual(len(orphan_issues), 0, f"Policy reported as orphan: {orphan_issues}")
+
+    def test_context_pack_ascii_rendering_and_encoding_safety(self) -> None:
+        """Regression test verifying ASCII-safe rendering for non-UTF-8 REPLs (cp1252)."""
+        pack = ContextPack(
+            task="authentication update",
+            provider_diagnostics=[{"diagnostic_message": "CBM provider unavailable"}],
+            conflicts_and_staleness=[{"warning": "DRIFT: RiskGate missing in order.py"}],
+        )
+
+        # 1. UTF-8 output contains Unicode status icons
+        utf8_text = pack.to_text(ascii_only=False)
+        self.assertIn("ℹ️", utf8_text)
+        self.assertIn("⚠️", utf8_text)
+
+        # 2. ASCII-safe output contains ASCII replacement markers
+        ascii_text = pack.to_ascii_text()
+        self.assertIn("[INFO]", ascii_text)
+        self.assertIn("[WARNING]", ascii_text)
+        self.assertNotIn("ℹ️", ascii_text)
+        self.assertNotIn("⚠️", ascii_text)
+
+        # 3. ASCII output encodes in cp1252 without UnicodeEncodeError
+        encoded_cp1252 = ascii_text.encode("cp1252")
+        self.assertIsNotNone(encoded_cp1252)
+
+        # 4. render_safe_text automatically uses ascii_only when stream encoding is cp1252
+        cp1252_safe = pack.render_safe_text(stream_encoding="cp1252")
+        self.assertIn("[INFO]", cp1252_safe)
+        self.assertIn("[WARNING]", cp1252_safe)
+        self.assertIsNotNone(cp1252_safe.encode("cp1252"))
+
+
 if __name__ == "__main__":
     unittest.main()
 

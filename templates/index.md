@@ -20,6 +20,9 @@ _(none yet)_
 ### Requirements (`requirements/`)
 _(none yet)_
 
+### Policies (`policies/`)
+_(none yet)_
+
 ### Technical knowledge (`technical/`)
 _(none yet)_
 

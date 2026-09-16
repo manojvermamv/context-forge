@@ -249,6 +249,24 @@ class KnowledgeRecord:
         res["claim"] = self.claim.to_dict() if self.claim else None
         return res
 
+    def to_ascii_text(self) -> str:
+        """Render ASCII-safe Markdown context pack for non-UTF-8 consumers or environments."""
+        return self.to_text(ascii_only=True)
+
+    def render_safe_text(self, stream_encoding: Optional[str] = None) -> str:
+        """Render context pack safely for standard output or interactive REPL.
+        
+        Uses ascii_only mode automatically if the target encoding cannot represent Unicode status markers.
+        """
+        import sys
+        enc = stream_encoding or getattr(sys.stdout, "encoding", None) or "utf-8"
+        try:
+            rendered = self.to_text(ascii_only=False)
+            rendered.encode(enc)
+            return rendered
+        except (UnicodeEncodeError, LookupError):
+            return self.to_text(ascii_only=True)
+
     def to_markdown(self) -> str:
         """Serialize record into canonical Markdown with YAML frontmatter."""
         fm_lines = [
@@ -568,18 +586,21 @@ class ContextPack:
             provider_diagnostics=sec.get("provider_diagnostics") or data.get("provider_diagnostics", []),
         )
 
-    def to_text(self) -> str:
+    def to_text(self, ascii_only: bool = False) -> str:
         """Render into human and agent-readable Markdown context pack."""
+        info_icon = "[INFO]" if ascii_only else "ℹ️"
+        warn_icon = "[WARNING]" if ascii_only else "⚠️"
+        dot_icon = "-" if ascii_only else "·"
         lines = [
             f"# Context Pack — Task: {self.task}",
-            f"_Compiled at {self.compiled_at} · Total chars: {self.total_chars} (~{self.estimated_tokens} tokens)_",
+            f"_Compiled at {self.compiled_at} {dot_icon} Total chars: {self.total_chars} (~{self.estimated_tokens} tokens)_",
             "",
         ]
         if self.provider_diagnostics:
             lines.append("## Provider Health & Intelligence Sources")
             for diag in self.provider_diagnostics:
                 msg = diag.get("diagnostic_message") or diag.get("diagnostic") if isinstance(diag, dict) else str(diag)
-                lines.append(f"- ℹ️ {msg}")
+                lines.append(f"- {info_icon} {msg}")
             lines.append("")
 
         if self.authoritative_intent:
@@ -611,18 +632,36 @@ class ContextPack:
         if self.conflicts_and_staleness:
             lines.append("## 5. Conflict & Staleness Alerts")
             for item in self.conflicts_and_staleness:
-                lines.append(f"- ⚠️ {item.get('warning')}")
+                lines.append(f"- {warn_icon} {item.get('warning')}")
             lines.append("")
 
         lines.append("## 6. Next Reading (Recommended bounded files)")
         if self.next_reading:
             for f in self.next_reading:
-                lines.append(f"- `{f}`")
+                lines.append(f"- `{f}` ")
         else:
             lines.append("- (No additional files required)")
         lines.append("")
 
         return "\n".join(lines)
+
+    def to_ascii_text(self) -> str:
+        """Render ASCII-safe Markdown context pack for non-UTF-8 consumers or environments."""
+        return self.to_text(ascii_only=True)
+
+    def render_safe_text(self, stream_encoding: Optional[str] = None) -> str:
+        """Render context pack safely for standard output or interactive REPL.
+        
+        Uses ascii_only mode automatically if the target encoding cannot represent Unicode status markers.
+        """
+        import sys
+        enc = stream_encoding or getattr(sys.stdout, "encoding", None) or "utf-8"
+        try:
+            rendered = self.to_text(ascii_only=False)
+            rendered.encode(enc)
+            return rendered
+        except (UnicodeEncodeError, LookupError):
+            return self.to_text(ascii_only=True)
 
     def to_markdown(self) -> str:
         return self.to_text()

@@ -12,6 +12,7 @@ ROUTE_END = "<!-- context-forge:auto-routes:end -->"
 ROUTED_SECTIONS = (
     ("Decisions", "decisions"),
     ("Requirements", "requirements"),
+    ("Policies", "policies"),
     ("Technical knowledge", "technical"),
     ("Traceability", "traceability"),
     ("Open questions", "questions"),
@@ -27,6 +28,7 @@ def record_kind(path: Path, root: Path) -> str:
     return {
         "decisions": "decision",
         "requirements": "requirement",
+        "policies": "policy",
         "technical": "technical",
         "traceability": "traceability",
         "questions": "question",

@@ -22,27 +22,30 @@ Context Forge gives a codebase a small, reviewable knowledge base and federated 
 ### Architecture — The Three Federated Planes
 
 ~~~text
-                     CONTEXT FORGE
+                      CONTEXT FORGE
+             Project Intelligence Control Plane
                            │
-          ┌────────────────┼────────────────┐
-          │                │                │
-          ▼                ▼                ▼
-     PROJECT TRUTH     CODE REALITY     AGENT EXPERIENCE
-          │                │                │
-     canonical Git       CBM/native     AgentMemory/native
-          │                │                │
-          └────────────────┼────────────────┘
+         ┌─────────────────┼─────────────────┐
+         │                 │                 │
+         ▼                 ▼                 ▼
+   PROJECT TRUTH      CODE REALITY     AGENT EXPERIENCE
+   Context Forge       CBM / native    AgentMemory / native
+         │                 │                 │
+ requirements          symbols           sessions
+ decisions             dependencies      lessons
+ policies              callers/callees   failures
+ invariants            graph relations   procedural memory
+ questions             impact            observations
+ provenance            architecture      handoffs
+ traceability          current code      historical experience
+         │                 │                 │
+         └─────────────────┼─────────────────┘
+                           ▼
+                   CONTEXT COMPILER
+             (Bounded Task-Specific Pack)
                            │
                            ▼
-                 Authority / Evidence
-                 Provenance / Freshness
-                  Conflict / Traceability
-                           │
-                           ▼
-                  Bounded Context Compiler
-                           │
-                           ▼
-                     Coding Agents
+                Autonomous Coding Agents
 ~~~
 
 Context Forge maintains three distinct epistemological planes:
@@ -117,14 +120,14 @@ After installing for Codex, run **/hooks** once and review each new or changed h
 
 ~~~mermaid
 flowchart TD
-  A[Agent receives a task] --> B[Read the short route<br/>index, state, status]
-  B --> C{Need more project context?}
-  C -->|Yes| D[Open only relevant records]
+  A[Agent receives a task] --> B[Federated Context Compilation<br/>brain.py context or index/state/status]
+  B --> C{Need deeper project context?}
+  C -->|Yes| D[Open only relevant records<br/>or query search index]
   C -->|No| E[Work and test]
   D --> E
   E --> F{What was learned?}
-  F -->|Code-observed fact| G[Update technical record<br/>and traceability]
-  F -->|Clear user decision| H[Record accepted decision or requirement<br/>with compact evidence]
+  F -->|Code-observed fact| G[Record technical fact & traceability<br/>authority: code_observed]
+  F -->|Clear user decision| H[Record accepted decision / ADR / REQ<br/>authority: user_explicit + evidence]
   F -->|Unclear or inferred| I[Keep an open question<br/>or private candidate]
   G --> J[Refresh map, index, and registry]
   H --> J

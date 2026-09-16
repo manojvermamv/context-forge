@@ -124,26 +124,33 @@ def build_code_map(repo: Path) -> str:
         lines.append(f"| {lang} | {n} |")
 
     lines += ["", "## Key symbols (top-level def/class only, capped)", ""]
-    budget_used = sum(len(l) + 1 for l in lines)
     per_file: dict[str, list[tuple[int, str]]] = {}
     for rel, ln, name in symbol_lines:
         per_file.setdefault(rel, []).append((ln, name))
 
-    remaining = Budgets.MAP_CHARS - budget_used
+    max_budget = Budgets.MAP_CHARS
+    current_len = sum(len(l) + 1 for l in lines)
     emitted_files = 0
+    total_files = len(per_file)
+
     for rel, syms in sorted(per_file.items()):
-        if remaining <= 0:
-            lines.append(
-                f"_...map budget ({Budgets.MAP_CHARS} chars) reached — "
-                f"{len(per_file) - emitted_files} more files have symbols not shown; "
-                "use `brain.py search <repo> <name>` instead._"
-            )
+        row = f"- `{rel}`: " + ", ".join(f"{name}:{ln}" for ln, name in syms[:8])
+        if len(syms) > 8:
+            row += f" (+{len(syms) - 8} more)"
+
+        remaining_files = total_files - (emitted_files + 1)
+        needed = len(row) + 1
+        if remaining_files > 0:
+            trunc_sample = f"_...map budget ({max_budget} chars) reached — {remaining_files} more files have symbols not shown; use `brain.py search <repo> <name>` instead._"
+            needed += len(trunc_sample) + 1
+
+        if current_len + needed > max_budget:
+            trunc_final = f"_...map budget ({max_budget} chars) reached — {total_files - emitted_files} more files have symbols not shown; use `brain.py search <repo> <name>` instead._"
+            lines.append(trunc_final)
             break
-        row = f"- `{rel}`: " + ", ".join(f"{name}:{ln}" for ln, name in syms[:12])
-        if len(syms) > 12:
-            row += f" (+{len(syms) - 12} more)"
+
         lines.append(row)
-        remaining -= len(row)
+        current_len += len(row) + 1
         emitted_files += 1
 
     return "\n".join(lines) + "\n"
