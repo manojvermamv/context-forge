@@ -78,7 +78,7 @@ class TraceEdge:
     relationship: Optional[str] = None
     verification_kind: str = VerificationKind.UNKNOWN.value
     structurally_verified: bool = False
-    verification_domain: str = TraceEdgeVerificationDomain.CODE_STRUCTURE.value
+    verification_domain: str = ""
     reference_verified: bool = False
     symbol_verified: bool = False
     relationship_requested: bool = False

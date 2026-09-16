@@ -5,6 +5,7 @@ import os
 import time
 import urllib.error
 import urllib.request
+import urllib.parse
 from typing import Any, Optional
 from context_forge.core.evidence import screen_secrets
 from context_forge.providers.base import ExperienceProvider, ProviderResult, ProviderStatus
@@ -159,9 +160,10 @@ class AgentMemoryProvider(ExperienceProvider):
                     with urllib.request.urlopen(req_lz, timeout=1.5) as resp_lz:
                         if resp_lz.status == 200:
                             return ProviderResult(
-                                status=ProviderStatus.OK,
+                                status=ProviderStatus.DEGRADED,
                                 provider=self.name(),
-                                diagnostic="AgentMemory alive via /agentmemory/livez.",
+                                diagnostic_code="LIVEZ_UNVERIFIED_READINESS",
+                                diagnostic="Liveness ping OK via /agentmemory/livez; AgentMemory readiness/compatibility unverified.",
                                 execution_time_ms=(time.monotonic() - t0) * 1000,
                             )
                 except Exception:
@@ -371,7 +373,29 @@ class AgentMemoryProvider(ExperienceProvider):
     ) -> ProviderResult:
         """Store an experiential lesson via POST /agentmemory/remember."""
         t0 = time.monotonic()
-        data: dict[str, Any] = {"content": content}
+        
+        # Security Guard 1: Insecure transport check for authenticated non-loopback endpoints
+        if self.secret and not self.endpoint_url.startswith("https://"):
+            parsed_url = urllib.parse.urlparse(self.endpoint_url)
+            host = (parsed_url.hostname or "").lower()
+            is_loopback = host in ("localhost", "127.0.0.1", "::1", "[::1]")
+            allow_insecure = os.environ.get("AGENTMEMORY_ALLOW_INSECURE_HTTP", "0").lower() in ("1", "true", "yes")
+            if not is_loopback and not allow_insecure:
+                return ProviderResult(
+                    status=ProviderStatus.UNAUTHORIZED,
+                    provider=self.name(),
+                    diagnostic_code="INSECURE_TRANSPORT_REJECTED",
+                    diagnostic="Bearer authentication over non-HTTPS to non-loopback endpoint is rejected for security. Set AGENTMEMORY_ALLOW_INSECURE_HTTP=1 to override.",
+                )
+
+        # Security Guard 2: Screen sensitive secrets from outbound content
+        clean_content = screen_secrets(content)
+
+        data: dict[str, Any] = {"content": clean_content}
+        if concepts:
+            data["concepts"] = concepts
+        data["metadata"] = dict(metadata or {})
+        data["metadata"]["producer"] = "context-forge"
         if concepts:
             data["concepts"] = concepts
         if metadata:

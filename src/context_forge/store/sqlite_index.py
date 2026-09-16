@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import re
 import sqlite3
 from pathlib import Path
@@ -37,16 +39,19 @@ def fts5_available() -> bool:
 
 def build_fts5_index(db_path: Path, docs: list[dict[str, str]]) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    if db_path.exists():
-        db_path.unlink()
-    con = sqlite3.connect(str(db_path))
+    tmp_db = db_path.with_suffix(f".tmp{os.getpid()}_{os.urandom(4).hex()}.sqlite")
+    if tmp_db.exists():
+        tmp_db.unlink()
+    sorted_docs = sorted(docs, key=lambda d: d["path"])
+    con = sqlite3.connect(str(tmp_db))
     con.execute("CREATE VIRTUAL TABLE pages USING fts5(path, title, body)")
     con.executemany(
         "INSERT INTO pages(path, title, body) VALUES (?, ?, ?)",
-        [(d["path"], d["title"], d["text"]) for d in docs]
+        [(d["path"], d["title"], d["text"]) for d in sorted_docs]
     )
     con.commit()
     con.close()
+    tmp_db.replace(db_path)
 
 
 def search_fts5(db_path: Path, query: str, limit: int = 5) -> list[dict[str, str]]:
@@ -58,7 +63,7 @@ def search_fts5(db_path: Path, query: str, limit: int = 5) -> list[dict[str, str
         match_expr = " OR ".join(f'"{t}"' for t in terms)
         rows = con.execute(
             "SELECT path, title, snippet(pages, 2, '', '', '…', 12) "
-            "FROM pages WHERE pages MATCH ? ORDER BY bm25(pages) LIMIT ?",
+            "FROM pages WHERE pages MATCH ? ORDER BY bm25(pages) ASC, path ASC LIMIT ?",
             (match_expr, limit),
         ).fetchall()
         return [{"path": r[0], "title": r[1], "snippet": r[2]} for r in rows]

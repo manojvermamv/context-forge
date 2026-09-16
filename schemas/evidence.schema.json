@@ -4,7 +4,9 @@
   "title": "ContextForgeEvidence",
   "description": "Sanitized evidence statement, proof references, and verification digest.",
   "type": "object",
-  "required": ["statement"],
+  "required": [
+    "statement"
+  ],
   "properties": {
     "statement": {
       "type": "string",
@@ -27,12 +29,15 @@
         "audit_log",
         "external_doc",
         "agent_inference",
-        "derived_link"
+        "derived_link",
+        "policy_mandate"
       ]
     },
     "source_refs": {
       "type": "array",
-      "items": { "type": "string" },
+      "items": {
+        "type": "string"
+      },
       "description": "List of path:line pointers or commit references."
     },
     "contains_redactions": {
@@ -53,7 +58,13 @@
     },
     "verification_state": {
       "type": "string",
-      "enum": ["verified", "unverified", "possibly_stale", "stale", "contradicted"],
+      "enum": [
+        "verified",
+        "unverified",
+        "possibly_stale",
+        "stale",
+        "contradicted"
+      ],
       "default": "unverified"
     },
     "verified_at": {

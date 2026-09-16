@@ -656,3 +656,20 @@ class ContextPack:
         from context_forge.compiler.allocator import finalize_context_pack
         return finalize_context_pack(self, max_budget=max_budget)
 
+@dataclass
+class ApprovalReceipt:
+    """Durable receipt proving who approved a candidate, under what authority, and at which Git commit."""
+    candidate_id: str
+    approved_at: str = field(default_factory=now_iso)
+    reviewer_identity: IdentityEnvelope = field(default_factory=IdentityEnvelope)
+    candidate_digest: str = ""
+    commit_sha: str = ""
+    promotion_target: str = "log.md"
+    approval_channel: str = "cli_review"
+
+    def to_dict(self) -> dict[str, Any]:
+        res = asdict(self)
+        res["reviewer_identity"] = self.reviewer_identity.to_dict()
+        return res
+
+

@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional, Union
 from context_forge.core.evidence import screen_secrets
+from context_forge.store.paths import is_safe_repo_path, canonicalize_repo_path
 from context_forge.providers.base import (
     CodeIntelligenceProvider,
     ProviderResult,
@@ -483,6 +484,15 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
         project_name, err = self.resolve_project(repo_path, allow_index=False)
         if err is not None:
             return err
+
+        if path and not is_safe_repo_path(Path(repo_path), path):
+            return ProviderResult(
+                status=ProviderStatus.ERROR,
+                provider=self.name(),
+                project_name=project_name or "",
+                diagnostic_code="PATH_CONTAINMENT_BREACH",
+                diagnostic=f"Path '{path}' breaches repository boundary.",
+            )
 
         # Supported CBM structural relation aliases
         SUPPORTED_RELATIONS = {

@@ -67,9 +67,13 @@ def approved_log_entry(candidate: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def approve_candidate(repo: Path, candidate_id: str) -> int:
-    """Promote exactly one reviewed candidate from .brain/.state/pending into canonical memory."""
+def approve_candidate(repo: Path, candidate_id: str, identity: IdentityEnvelope | None = None) -> int:
+    """Promote exactly one reviewed candidate from .brain/.state/pending into canonical memory with ApprovalReceipt."""
     from context_forge.store.lock import repo_lock
+    from context_forge.core.identity import build_identity_envelope, get_git_info
+    from context_forge.core.models import ApprovalReceipt, IdentityEnvelope
+    from context_forge.store.audit import append_audit_log
+
     p = brain_paths(repo)
     with repo_lock(p):
         try:
@@ -92,6 +96,21 @@ def approve_candidate(repo: Path, candidate_id: str) -> int:
             print(f"[brain] approval rejected: {problem}")
             return 1
 
+        actual_identity = identity or build_identity_envelope(repo=repo)
+        commit_sha, _, _ = get_git_info(repo) if (repo / ".git").exists() else ("", "", "")
+        if commit_sha and not actual_identity.commit_sha:
+            actual_identity.commit_sha = commit_sha
+
+        receipt = ApprovalReceipt(
+            candidate_id=candidate_id,
+            approved_at=now_iso(),
+            reviewer_identity=actual_identity,
+            candidate_digest=candidate_id,
+            commit_sha=actual_identity.commit_sha,
+            promotion_target="log.md",
+            approval_channel="cli_review",
+        )
+
         marker = f"candidate:{candidate_id}"
         log_text = read_text(p["log"])
         if marker not in log_text:
@@ -103,8 +122,19 @@ def approve_candidate(repo: Path, candidate_id: str) -> int:
 
         candidate["status"] = "approved"
         candidate["approved_at"] = now_iso()
+        candidate["approval_receipt"] = receipt.to_dict()
+
         p["approved"].mkdir(parents=True, exist_ok=True)
         atomic_write(approved_path, json.dumps(candidate, indent=2, sort_keys=True) + "\n")
         pending_path.unlink(missing_ok=True)
+
+        append_audit_log(
+            p,
+            f"approve candidate:{candidate_id}",
+            approved_path,
+            f"Candidate {candidate_id} promoted to canonical log.md with approval receipt.",
+            identity=actual_identity,
+        )
+
         print(f"[brain] approved candidate {candidate_id}; canonical hot memory and index refreshed")
         return 0

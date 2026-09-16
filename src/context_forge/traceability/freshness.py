@@ -309,8 +309,21 @@ def evaluate_record_freshness(
     rec_id_match = re.search(r"(?m)^id:\s*([A-Za-z0-9_-]+)", text)
     rec_id = rec_id_match.group(1) if rec_id_match else record_path.stem
 
-    # Find all path references
-    linked_paths = sorted(set(re.findall(r"- `([^`]+\.[a-zA-Z0-9]+)`", text)))
+    # Parse scope paths from frontmatter or Markdown links (including extensionless files like Dockerfile)
+    from context_forge.store.markdown import parse_markdown_record
+    try:
+        parsed_rec = parse_markdown_record(record_path, repo)
+        linked_paths = list(parsed_rec.scope) if parsed_rec.scope else []
+    except Exception:
+        linked_paths = []
+
+    if not linked_paths:
+        raw_links = re.findall(r"- `([^`]+)`", text)
+        for rl in raw_links:
+            rl_clean = rl.strip().replace("\\", "/")
+            if rl_clean and not rl_clean.startswith(("http://", "https://", "ADR-", "REQ-", "POL-", "TECH-", "Q-", "TRACE-")):
+                linked_paths.append(rl_clean)
+    linked_paths = sorted(set(linked_paths))
     if not linked_paths:
         return FreshnessEvaluation(
             record_id=rec_id,

@@ -9,7 +9,8 @@ from context_forge.store.sqlite_index import tokenize, query_terms
 def build_json_index(json_path: Path, docs: list[dict[str, str]]) -> None:
     inverted: dict[str, list[str]] = {}
     titles: dict[str, str] = {}
-    for d in docs:
+    sorted_docs = sorted(docs, key=lambda d: d["path"])
+    for d in sorted_docs:
         titles[d["path"]] = d["title"]
         seen = set()
         for tok in tokenize(d["text"]):
@@ -31,5 +32,5 @@ def search_json_index(json_path: Path, query: str, limit: int = 5) -> list[dict[
     for tok in terms:
         for path in inverted.get(tok, []):
             scores[path] = scores.get(path, 0) + 1
-    ranked = sorted(scores.items(), key=lambda kv: -kv[1])[:limit]
+    ranked = sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]
     return [{"path": path, "title": titles.get(path, path), "snippet": ""} for path, _ in ranked]
