@@ -249,24 +249,6 @@ class KnowledgeRecord:
         res["claim"] = self.claim.to_dict() if self.claim else None
         return res
 
-    def to_ascii_text(self) -> str:
-        """Render ASCII-safe Markdown context pack for non-UTF-8 consumers or environments."""
-        return self.to_text(ascii_only=True)
-
-    def render_safe_text(self, stream_encoding: Optional[str] = None) -> str:
-        """Render context pack safely for standard output or interactive REPL.
-        
-        Uses ascii_only mode automatically if the target encoding cannot represent Unicode status markers.
-        """
-        import sys
-        enc = stream_encoding or getattr(sys.stdout, "encoding", None) or "utf-8"
-        try:
-            rendered = self.to_text(ascii_only=False)
-            rendered.encode(enc)
-            return rendered
-        except (UnicodeEncodeError, LookupError):
-            return self.to_text(ascii_only=True)
-
     def to_markdown(self) -> str:
         """Serialize record into canonical Markdown with YAML frontmatter."""
         fm_lines = [

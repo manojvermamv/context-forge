@@ -151,7 +151,7 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
                 status=ProviderStatus.DEGRADED,
                 provider=self.name(),
                 diagnostic_code="CBM_TIMEOUT",
-                diagnostic="CBM --version timed out after 5.0s.",
+                diagnostic=f"CBM --version timed out after 10.0s.",
             )
         except Exception as exc:
             return ProviderResult(
@@ -174,6 +174,8 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
         try:
             # Construct modern CLI command with machine-readable flags
             cmd = [str(exe), "cli", tool_name]
+            if "format" not in args and "output" not in args:
+                cmd.extend(["--format", "json"])
             for k, v in args.items():
                 if v is None:
                     continue
@@ -482,9 +484,36 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
         if err is not None:
             return err
 
+        # Supported CBM structural relation aliases
+        SUPPORTED_RELATIONS = {
+            "calls": "CALLS",
+            "call": "CALLS",
+            "invokes": "CALLS",
+            "inherits": "INHERITS",
+            "extends": "INHERITS",
+            "subclass_of": "INHERITS",
+            "implements_interface": "IMPLEMENTS_INTERFACE",
+            "implements_trait": "IMPLEMENTS_INTERFACE",
+            "implements": "IMPLEMENTS_INTERFACE",
+            "symbol_defines": "SYMBOL_DEFINES",
+            "defines": "SYMBOL_DEFINES",
+        }
+
         # Case 1: Relationship specified
         if relationship:
+            rel_clean = relationship.lower().strip().replace("-", "_")
+            if rel_clean in ("satisfies", "derived_from", "governance", "implements_requirement"):
+                return ProviderResult(
+                    status=ProviderStatus.UNSUPPORTED,
+                    provider=self.name(),
+                    project_name=project_name,
+                    diagnostic_code="GOVERNANCE_EDGE_UNSUPPORTED",
+                    diagnostic=f"Governance relationship '{relationship}' is maintained by Context Forge, not codebase-memory-mcp.",
+                )
+
             query_target = symbol or path
+
+            # Route CALLS tool selection (trace_path / search_graph)
             res = self.run_tool(
                 "search_graph",
                 {
@@ -499,78 +528,90 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
 
             raw_data = res.data
             nodes = raw_data if isinstance(raw_data, list) else (raw_data.get("results") or raw_data.get("nodes") or []) if isinstance(raw_data, dict) else []
-            rel_norm = relationship.lower().replace("-", "_")
+            canon_rel = SUPPORTED_RELATIONS.get(rel_clean, rel_clean.upper())
 
             found_rel = False
             found_symbol = False
             matched_edge = None
 
-            # Endpoint candidate sets
-            src_tokens = {s.lower() for s in (symbol, path, Path(path).name, Path(path).stem) if s}
-            tgt_tokens = set()
-            if target_symbol or target_path:
-                tgt_tokens = {t.lower() for t in (target_symbol, target_path, Path(target_path).name if target_path else None, Path(target_path).stem if target_path else None) if t}
+            def _norm_sym(s: Optional[str]) -> str:
+                return (s or "").strip().lower()
 
-            def _endpoint_matches(val: Any, tokens: set[str]) -> bool:
-                if not val or not tokens:
+            def _norm_path(p: Optional[str]) -> str:
+                if not p:
+                    return ""
+                return normalize_repo_path(p)
+
+            def _exact_endpoint_match(val: Any, exp_sym: Optional[str], exp_path: Optional[str]) -> bool:
+                if not val:
                     return False
+                v_sym, v_path = "", ""
                 if isinstance(val, dict):
-                    extracted = [val.get("name"), val.get("symbol"), val.get("id"), val.get("path"), val.get("file")]
-                    return any(str(e).lower() in tokens or any(t in str(e).lower() for t in tokens) for e in extracted if e)
-                v_str = str(val).lower().replace("\\", "/")
-                return any(t == v_str or v_str.endswith("/" + t) or t in v_str for t in tokens)
+                    v_sym = val.get("name") or val.get("symbol") or val.get("id") or ""
+                    v_path = val.get("path") or val.get("file") or ""
+                else:
+                    v_sym = str(val)
+                    v_path = ""
 
+                sym_ok = True
+                if exp_sym:
+                    sym_ok = (_norm_sym(v_sym) == _norm_sym(exp_sym))
+                path_ok = True
+                if exp_path and v_path:
+                    path_ok = (_norm_path(v_path) == _norm_path(exp_path)) or _norm_path(v_path).endswith("/" + _norm_path(exp_path))
+                elif not exp_sym and exp_path and not v_path:
+                    path_ok = (_norm_path(v_sym) == _norm_path(exp_path)) or _norm_path(v_sym).endswith("/" + _norm_path(exp_path))
+
+                return sym_ok and path_ok
+
+            # Deterministic exact edge matching (source == src AND target == tgt)
             if isinstance(raw_data, dict):
                 edges = raw_data.get("edges") or raw_data.get("relationships") or []
                 for edge in edges:
                     if isinstance(edge, dict):
                         e_type = str(edge.get("type") or edge.get("relationship") or edge.get("kind") or "").lower().replace("-", "_")
-                        if e_type and (rel_norm in e_type or e_type in rel_norm):
-                            e_src = edge.get("source") or edge.get("from") or edge.get("source_id") or edge.get("source_name") or edge.get("caller") or edge.get("origin")
-                            e_tgt = edge.get("target") or edge.get("to") or edge.get("target_id") or edge.get("target_name") or edge.get("callee") or edge.get("destination")
-                            
-                            if tgt_tokens:
-                                # Both endpoints must match: (src->tgt) or (tgt->src)
-                                if (_endpoint_matches(e_src, src_tokens) and _endpoint_matches(e_tgt, tgt_tokens)) or \
-                                   (_endpoint_matches(e_tgt, src_tokens) and _endpoint_matches(e_src, tgt_tokens)):
+                        mapped_e_type = SUPPORTED_RELATIONS.get(e_type, e_type.upper())
+                        if mapped_e_type == canon_rel:
+                            e_src = edge.get("source") or edge.get("from") or edge.get("source_id") or edge.get("source_name") or edge.get("caller")
+                            e_tgt = edge.get("target") or edge.get("to") or edge.get("target_id") or edge.get("target_name") or edge.get("callee")
+
+                            if target_symbol or target_path:
+                                if _exact_endpoint_match(e_src, symbol, path) and _exact_endpoint_match(e_tgt, target_symbol, target_path):
                                     found_rel = True
                                     matched_edge = edge
                                     break
                             else:
-                                # At least one endpoint must connect to the query source (symbol or path)
-                                if _endpoint_matches(e_src, src_tokens) or _endpoint_matches(e_tgt, src_tokens):
+                                if _exact_endpoint_match(e_src, symbol, path):
                                     found_rel = True
                                     matched_edge = edge
                                     break
 
             for node in nodes:
                 if isinstance(node, dict):
-                    name = node.get("name") or node.get("symbol") or ""
-                    if symbol and name == symbol:
+                    n_name = node.get("name") or node.get("symbol") or ""
+                    if symbol and _norm_sym(n_name) == _norm_sym(symbol):
                         found_symbol = True
-                    # Only verify relationship through node if this node matches the source
-                    node_matches_src = _endpoint_matches(name, src_tokens) or _endpoint_matches(node.get("path"), src_tokens)
-                    if node_matches_src:
+                    if _exact_endpoint_match(node, symbol, path):
                         n_rel = str(node.get("relationship") or node.get("relations") or "").lower().replace("-", "_")
-                        if n_rel and (rel_norm in n_rel or n_rel in rel_norm):
-                            if tgt_tokens:
-                                n_target = node.get("target") or node.get("target_symbol") or node.get("target_name")
-                                if _endpoint_matches(n_target, tgt_tokens):
+                        mapped_n_rel = SUPPORTED_RELATIONS.get(n_rel, n_rel.upper())
+                        if mapped_n_rel == canon_rel:
+                            if target_symbol or target_path:
+                                n_tgt = node.get("target") or node.get("target_symbol") or node.get("target_name")
+                                if _exact_endpoint_match(n_tgt, target_symbol, target_path):
                                     found_rel = True
                                     break
                             else:
                                 found_rel = True
                                 break
 
-            # If target endpoint was specified and not found in search_graph, try trace_path tool
-            if not found_rel and (target_symbol or target_path):
+            # If target endpoint was specified, route CALLS through trace_path
+            if not found_rel and (target_symbol or target_path) and canon_rel == "CALLS":
                 tp_res = self.run_tool(
                     "trace_path",
                     {
                         "project": project_name,
                         "from": symbol or path,
                         "to": target_symbol or target_path,
-                        "relationship": relationship,
                     },
                     timeout=10.0,
                 )
@@ -630,7 +671,6 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
                     diagnostic=f"Symbol '{query_target}' found in CBM graph, but relationship '{relationship}' was not structurally verified.",
                 )
             else:
-                # Check filesystem existence inside repo
                 p_disk = Path(repo_path) / path
                 if p_disk.exists():
                     return ProviderResult(
@@ -682,7 +722,16 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
 
             raw_data = res.data
             nodes = raw_data if isinstance(raw_data, list) else (raw_data.get("results") or raw_data.get("nodes") or []) if isinstance(raw_data, dict) else []
-            if nodes:
+            
+            # Exact symbol verification
+            matching_nodes = []
+            for n in nodes:
+                if isinstance(n, dict):
+                    n_sym = n.get("name") or n.get("symbol") or ""
+                    if n_sym.strip().lower() == symbol.strip().lower():
+                        matching_nodes.append(n)
+
+            if matching_nodes:
                 return ProviderResult(
                     status=ProviderStatus.OK,
                     provider=self.name(),
@@ -700,7 +749,7 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
                         "edge_confidence": 0.90,
                         "symbol": symbol,
                         "path": path,
-                        "nodes": nodes,
+                        "nodes": matching_nodes,
                     },
                     diagnostic=f"Symbol '{symbol}' verified in CBM project '{project_name}'.",
                 )
@@ -829,4 +878,3 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
 
 
 CBMProvider = CodebaseMemoryMCPProvider
-

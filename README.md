@@ -51,7 +51,7 @@ Context Forge gives a codebase a small, reviewable knowledge base and federated 
 Context Forge maintains three distinct epistemological planes:
 
 1. **Project Truth (Canonical Git-Native Knowledge)**: Requirements (`REQ`), Decisions (`ADR`), Policies (`POL`), and Invariants (`INV`) stored in `.brain/` as human-readable Markdown with structured frontmatter. Branchable, reviewable, and diffable.
-2. **Current Code Reality (Structural Code Intelligence)**: Backed by **Codebase-Memory-MCP (CBM)** for call-graphs, symbols, and impact analysis, with graceful functional degradation to a zero-dependency **Native AST/path mapper** when CBM is absent.
+2. **Current Code Reality (Structural Code Intelligence)**: Backed by **Codebase-Memory-MCP (CBM)** for call-graphs, symbols, and impact analysis, with graceful functional degradation to a zero-dependency **Native regex/path symbol mapper** when CBM is absent.
 3. **Agent Experience (Episodic & Procedural Memory)**: Backed by **AgentMemory** for cross-session lessons and procedural recall, with graceful functional degradation to a local **Native session log** when AgentMemory is absent.
 
 ### Core System Invariants

@@ -88,6 +88,14 @@ def _atomic_write(path: Path, text: str) -> None:
 def install_engine(engine_dir: Path) -> None:
     """Refresh tracked engine files without deleting unrelated local files."""
     engine_dir.mkdir(parents=True, exist_ok=True)
+    # Clean up obsolete renamed engine snippet file if upgrading from older version
+    old_snippet = engine_dir / "AGENTS.md.snippet.md"
+    if old_snippet.exists():
+        try:
+            old_snippet.unlink()
+        except OSError:
+            pass
+
     for subdir in ("scripts", "templates", "src", "schemas"):
         if (HERE / subdir).exists():
             shutil.copytree(HERE / subdir, engine_dir / subdir, dirs_exist_ok=True)

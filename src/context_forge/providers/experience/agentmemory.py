@@ -389,8 +389,24 @@ class AgentMemoryProvider(ExperienceProvider):
                 raw_text = resp.read().decode("utf-8")
                 try:
                     parsed = json.loads(raw_text)
-                except (json.JSONDecodeError, UnicodeDecodeError):
-                    parsed = {"status": "ok", "raw": raw_text}
+                except (json.JSONDecodeError, UnicodeDecodeError) as json_err:
+                    return ProviderResult(
+                        status=ProviderStatus.MALFORMED,
+                        provider=self.name(),
+                        diagnostic_code="MALFORMED_JSON",
+                        diagnostic=f"AgentMemory /remember returned malformed JSON: {json_err}",
+                        execution_time_ms=elapsed_ms,
+                    )
+
+                if not isinstance(parsed, (dict, list)):
+                    return ProviderResult(
+                        status=ProviderStatus.MALFORMED,
+                        provider=self.name(),
+                        diagnostic_code="INVALID_RESPONSE_TYPE",
+                        diagnostic="AgentMemory /remember returned unexpected non-JSON response structure.",
+                        execution_time_ms=elapsed_ms,
+                    )
+
                 return ProviderResult(
                     status=ProviderStatus.OK,
                     provider=self.name(),

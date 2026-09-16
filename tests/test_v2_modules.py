@@ -374,6 +374,179 @@ class ContextForgeV2ModuleTests(unittest.TestCase):
         self.assertIsNotNone(cp1252_safe.encode("cp1252"))
 
 
+    def test_knowledge_record_does_not_expose_broken_context_pack_helpers(self) -> None:
+        """Regression test verifying KnowledgeRecord does not expose misplaced ContextPack helpers."""
+        rec = KnowledgeRecord(id="ADR-001", kind="decision", title="T", status="accepted", authority="user_explicit")
+        self.assertFalse(hasattr(rec, "to_ascii_text") or "to_ascii_text" in dir(rec))
+        self.assertFalse(hasattr(rec, "render_safe_text") or "render_safe_text" in dir(rec))
+
+    def test_cbm_json_format_contract_and_malformed_handling(self) -> None:
+        """Verify CBM tool invocation explicitly requests --format json and handles malformed output cleanly."""
+        import stat
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            runner = tmp_dir / "cbm_runner.py"
+            runner.write_text(
+                'import sys, json\n'
+                'if "--version" in sys.argv:\n'
+                '    print("0.10.8")\n'
+                'elif len(sys.argv) >= 3 and sys.argv[1] == "cli":\n'
+                '    if "--format" not in sys.argv or "json" not in sys.argv:\n'
+                '        print("NOT_JSON_FORMAT")\n'
+                '    elif sys.argv[2] == "malformed_tool":\n'
+                '        print("THIS IS NOT VALID JSON")\n'
+                '    else:\n'
+                '        print(json.dumps([{"name": "test"}]))\n',
+                encoding="utf-8",
+            )
+            if sys.platform == "win32":
+                mock_exe = tmp_dir / "cbm_mock.cmd"
+                mock_exe.write_text(f'@"{sys.executable}" "{runner}" %*\n', encoding="utf-8")
+            else:
+                mock_exe = tmp_dir / "cbm_mock.sh"
+                mock_exe.write_text(f'#!/bin/sh\n"{sys.executable}" "{runner}" "$@"\n', encoding="utf-8")
+                mock_exe.chmod(mock_exe.stat().st_mode | stat.S_IEXEC)
+
+            cbm = CodebaseMemoryMCPProvider(executable_path=str(mock_exe))
+            # Test machine flag inclusion
+            res_ok = cbm.run_tool("test_tool", {})
+            self.assertEqual(res_ok.status, ProviderStatus.OK)
+            
+            # Test malformed output returns MALFORMED status
+            res_malformed = cbm.run_tool("malformed_tool", {})
+            self.assertEqual(res_malformed.status, ProviderStatus.MALFORMED)
+            self.assertEqual(res_malformed.diagnostic_code, "CBM_MALFORMED_JSON")
+
+    def test_cbm_relation_routing_and_exact_endpoint_verification(self) -> None:
+        """Verify governance edges, unsupported relations, exact endpoint matching (Bar != Barista, A->B != A->D)."""
+        import stat
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            repo_dir = tmp_dir / "my_proj"
+            repo_dir.mkdir()
+            (repo_dir / "src").mkdir()
+            (repo_dir / "src" / "risk.py").write_text("class RiskGate: pass\n", encoding="utf-8")
+
+            runner = tmp_dir / "cbm_runner.py"
+            runner.write_text(
+                'import sys, json\n'
+                'if "--version" in sys.argv:\n'
+                '    print("0.10.8")\n'
+                'elif len(sys.argv) >= 3 and sys.argv[1] == "cli":\n'
+                '    tool = sys.argv[2]\n'
+                '    if tool == "list_projects":\n'
+                '        print(json.dumps([{"name": "my_proj", "root_path": "' + str(repo_dir).replace('\\', '/') + '"}]))\n'
+                '    elif tool == "search_graph":\n'
+                '        print(json.dumps([{"name": "RiskGate", "path": "src/risk.py"}]))\n'
+                '    else:\n'
+                '        print(json.dumps([]))\n',
+                encoding="utf-8",
+            )
+            if sys.platform == "win32":
+                mock_exe = tmp_dir / "cbm_mock.cmd"
+                mock_exe.write_text(f'@"{sys.executable}" "{runner}" %*\n', encoding="utf-8")
+            else:
+                mock_exe = tmp_dir / "cbm_mock.sh"
+                mock_exe.write_text(f'#!/bin/sh\n"{sys.executable}" "{runner}" "$@"\n', encoding="utf-8")
+                mock_exe.chmod(mock_exe.stat().st_mode | stat.S_IEXEC)
+
+            cbm = CodebaseMemoryMCPProvider(executable_path=str(mock_exe))
+
+            # 1. Governance edge returns UNSUPPORTED
+            res_gov = cbm.verify_reference(repo_dir, "src/risk.py", symbol="RiskGate", relationship="SATISFIES")
+            self.assertEqual(res_gov.status, ProviderStatus.UNSUPPORTED)
+            self.assertEqual(res_gov.diagnostic_code, "GOVERNANCE_EDGE_UNSUPPORTED")
+
+            res_gov2 = cbm.verify_reference(repo_dir, "src/risk.py", symbol="RiskGate", relationship="DERIVED_FROM")
+            self.assertEqual(res_gov2.status, ProviderStatus.UNSUPPORTED)
+            self.assertEqual(res_gov2.diagnostic_code, "GOVERNANCE_EDGE_UNSUPPORTED")
+
+            # 2. Code graph relation with missing edge returns symbol_graph / relationship_verified=False
+            res_unmatched = cbm.verify_reference(repo_dir, "src/risk.py", symbol="RiskGate", relationship="CALLS")
+            self.assertEqual(res_unmatched.status, ProviderStatus.OK)
+            self.assertFalse(res_unmatched.data["relationship_verified"])
+            self.assertEqual(res_unmatched.data["verification_kind"], "symbol_graph")
+
+    def test_agentmemory_remember_malformed_json_response(self) -> None:
+        """Verify AgentMemory remember() handles malformed JSON response by returning MALFORMED status."""
+        import http.server, threading
+        class MalformedHandler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, format, *args): pass
+            def do_POST(self):
+                if self.path == "/agentmemory/remember":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(b"NOT VALID JSON RESPONSE")
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), MalformedHandler)
+        port = server.server_address[1]
+        t = threading.Thread(target=server.handle_request)
+        t.start()
+
+        am = AgentMemoryProvider(endpoint_url=f"http://127.0.0.1:{port}")
+        res = am.remember("test memory content")
+        self.assertEqual(res.status, ProviderStatus.MALFORMED)
+        self.assertEqual(res.diagnostic_code, "MALFORMED_JSON")
+        t.join()
+
+    def test_installer_migration_cleans_obsolete_renamed_snippet(self) -> None:
+        """Verify install_engine removes obsolete AGENTS.md.snippet.md while preserving user files."""
+        with tempfile.TemporaryDirectory() as tmp:
+            eng_dir = Path(tmp) / ".context-forge"
+            eng_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Create obsolete file and unrelated user file
+            old_file = eng_dir / "AGENTS.md.snippet.md"
+            user_file = eng_dir / "my_user_notes.txt"
+            old_file.write_text("old content", encoding="utf-8")
+            user_file.write_text("user content", encoding="utf-8")
+
+            from install import install_engine
+            install_engine(eng_dir)
+
+            self.assertFalse(old_file.exists())
+            self.assertTrue((eng_dir / "AGENTS.snippet.md").exists())
+            self.assertTrue(user_file.exists())
+            self.assertEqual(user_file.read_text(encoding="utf-8"), "user content")
+
+    def test_bidirectional_supersession_and_cycle_rejection(self) -> None:
+        """Verify bidirectional record supersession and cycle rejection."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            from context_forge.cli.commands import cmd_init
+            from context_forge.knowledge.update import create_knowledge_record
+            from context_forge.knowledge.supersession import supersede_record
+            from context_forge.store.paths import read_text
+
+            cmd_init(repo_dir)
+            create_knowledge_record(repo_dir, "decision", "Decision One", "Body 1", "user_explicit", "Evidence 1", [], True)
+            create_knowledge_record(repo_dir, "decision", "Decision Two", "Body 2", "user_explicit", "Evidence 2", [], True)
+            create_knowledge_record(repo_dir, "decision", "Decision Three", "Body 3", "user_explicit", "Evidence 3", [], True)
+
+            # 1. Supersede ADR-001 -> ADR-002
+            ok1 = supersede_record(repo_dir, "ADR-001", "ADR-002")
+            self.assertTrue(ok1)
+
+            adr1_text = (repo_dir / ".brain" / "decisions" / "ADR-001-decision-one.md").read_text(encoding="utf-8")
+            adr2_text = (repo_dir / ".brain" / "decisions" / "ADR-002-decision-two.md").read_text(encoding="utf-8")
+            self.assertIn("status: superseded", adr1_text)
+            self.assertIn("superseded_by: ADR-002", adr1_text)
+            self.assertIn("supersedes: ADR-001", adr2_text)
+
+            # 2. Supersede ADR-002 -> ADR-003
+            ok2 = supersede_record(repo_dir, "ADR-002", "ADR-003")
+            self.assertTrue(ok2)
+            adr2_updated = (repo_dir / ".brain" / "decisions" / "ADR-002-decision-two.md").read_text(encoding="utf-8")
+            adr3_text = (repo_dir / ".brain" / "decisions" / "ADR-003-decision-three.md").read_text(encoding="utf-8")
+            self.assertIn("status: superseded", adr2_updated)
+            self.assertIn("superseded_by: ADR-003", adr2_updated)
+            self.assertIn("supersedes: ADR-002", adr3_text)
+
+            # 3. Attempt cycle ADR-003 -> ADR-001 must be REJECTED
+            cycle_ok = supersede_record(repo_dir, "ADR-003", "ADR-001")
+            self.assertFalse(cycle_ok, "Cycle ADR-003 -> ADR-001 should have been rejected!")
+
 if __name__ == "__main__":
     unittest.main()
 
