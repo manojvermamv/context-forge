@@ -15,6 +15,8 @@ from context_forge.providers.base import (
     CodeIntelligenceProvider,
     ProviderResult,
     ProviderStatus,
+    ProviderCoverage,
+    NegativeClaim,
     VerificationKind,
     verification_confidence,
 )
@@ -715,6 +717,8 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
                     status=ProviderStatus.NO_RESULTS,
                     provider=self.name(),
                     project_name=project_name,
+                    coverage=ProviderCoverage(parse_state="complete", confidence=0.95),
+                    negative_claim=NegativeClaim(definitive=True, proof_scope="exact_edge"),
                     diagnostic=f"Reference '{query_target}' and relationship '{relationship}' not found in CBM project '{project_name}'.",
                 )
 
@@ -827,6 +831,8 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
                 status=ProviderStatus.NO_RESULTS,
                 provider=self.name(),
                 project_name=project_name,
+                coverage=ProviderCoverage(parse_state="complete", confidence=0.95),
+                negative_claim=NegativeClaim(definitive=True, proof_scope="exact_node"),
                 diagnostic=f"Symbol '{symbol}' not found in CBM project '{project_name}'.",
             )
 

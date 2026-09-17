@@ -89,6 +89,42 @@ class VerificationResult:
         }
 
 
+
+@dataclass
+class ProviderCoverage:
+    """Explicit epistemic coverage of structural intelligence providers.
+    
+    Prevents unindexed, partially parsed, or construct-limited provider queries
+    from fabricating non-existence.
+    """
+    language: str = ""
+    construct: str = ""
+    indexed_commit: str = ""
+    parse_state: str = "complete"  # "complete", "partial", "failed", "unindexed", "unknown"
+    confidence: float = 1.0        # 1.0 = full analyzer coverage, < 1.0 = partial/heuristic
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "language": self.language,
+            "construct": self.construct,
+            "indexed_commit": self.indexed_commit,
+            "parse_state": self.parse_state,
+            "confidence": self.confidence,
+        }
+
+
+@dataclass
+class NegativeClaim:
+    """Classification of negative evidence ('item absent' vs 'unverified due to coverage limits')."""
+    definitive: bool = False
+    proof_scope: str = "none"      # "none", "exact_node", "exact_edge", "full_graph", "file_parse"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "definitive": self.definitive,
+            "proof_scope": self.proof_scope,
+        }
+
 @dataclass
 class ProviderResult:
     """Structured response from an external or native intelligence provider."""
@@ -108,6 +144,8 @@ class ProviderResult:
     degraded: bool = False
     source_timestamp: str = field(default_factory=now_iso)
     project_name: str = ""
+    coverage: ProviderCoverage = field(default_factory=ProviderCoverage)
+    negative_claim: NegativeClaim = field(default_factory=NegativeClaim)
 
     def __post_init__(self) -> None:
         if not self.provider_name and self.provider:
@@ -149,6 +187,8 @@ class ProviderResult:
             "degraded": self.degraded,
             "source_timestamp": self.source_timestamp,
             "project_name": self.project_name,
+            "coverage": self.coverage.to_dict(),
+            "negative_claim": self.negative_claim.to_dict(),
         }
 
 
