@@ -438,6 +438,11 @@ class ContextForgeV2ModuleTests(unittest.TestCase):
                 '        print(json.dumps([{"name": "my_proj", "root_path": "' + str(repo_dir).replace('\\', '/') + '"}]))\n'
                 '    elif tool == "search_graph":\n'
                 '        print(json.dumps([{"name": "RiskGate", "path": "src/risk.py"}]))\n'
+                '    elif tool == "trace_path":\n'
+                '        if "--function-name" in sys.argv and "validate_order" in sys.argv:\n'
+                '            print(json.dumps({"hops": [{"name": "RiskGate", "path": "src/risk.py"}]}))\n'
+                '        else:\n'
+                '            print(json.dumps([]))\n'
                 '    else:\n'
                 '        print(json.dumps([]))\n',
                 encoding="utf-8",
@@ -466,6 +471,12 @@ class ContextForgeV2ModuleTests(unittest.TestCase):
             self.assertEqual(res_unmatched.status, ProviderStatus.OK)
             self.assertFalse(res_unmatched.data["relationship_verified"])
             self.assertEqual(res_unmatched.data["verification_kind"], "symbol_graph")
+
+            # 3. CALLS relation routed via trace_path schema (function_name, direction="outbound", depth=3)
+            res_calls_ok = cbm.verify_reference(repo_dir, "src/order.py", symbol="validate_order", relationship="CALLS", target_symbol="RiskGate")
+            self.assertEqual(res_calls_ok.status, ProviderStatus.OK)
+            self.assertTrue(res_calls_ok.data["relationship_verified"])
+            self.assertEqual(res_calls_ok.data["verification_kind"], "structural_graph")
 
     def test_agentmemory_remember_malformed_json_response(self) -> None:
         """Verify AgentMemory remember() handles malformed JSON response by returning MALFORMED status."""

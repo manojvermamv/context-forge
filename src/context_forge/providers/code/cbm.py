@@ -614,21 +614,28 @@ class CodebaseMemoryMCPProvider(CodeIntelligenceProvider):
                                 found_rel = True
                                 break
 
-            # If target endpoint was specified, route CALLS through trace_path
+            # If CALLS relationship and target endpoint specified, route through upstream trace_path schema
             if not found_rel and (target_symbol or target_path) and canon_rel == "CALLS":
                 tp_res = self.run_tool(
                     "trace_path",
                     {
                         "project": project_name,
-                        "from": symbol or path,
-                        "to": target_symbol or target_path,
+                        "function_name": symbol or path,
+                        "direction": "outbound",
+                        "depth": 3,
                     },
                     timeout=10.0,
                 )
                 if tp_res.is_ok() and tp_res.data:
                     tp_data = tp_res.data
-                    paths_found = tp_data.get("paths") or tp_data.get("path") if isinstance(tp_data, dict) else tp_data
-                    if paths_found:
+                    # Parse returned call graph hops to verify if target_symbol/target_path exists in outbound calls
+                    raw_hops = tp_data.get("hops") or tp_data.get("paths") or tp_data.get("nodes") or tp_data.get("calls") or []
+                    if isinstance(raw_hops, list):
+                        for hop in raw_hops:
+                            if _exact_endpoint_match(hop, target_symbol, target_path):
+                                found_rel = True
+                                break
+                    elif isinstance(tp_data, dict) and _exact_endpoint_match(tp_data, target_symbol, target_path):
                         found_rel = True
 
             if found_rel:
